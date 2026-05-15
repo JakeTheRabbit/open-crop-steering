@@ -6,6 +6,47 @@ A Home Assistant add-on (with standalone Docker fallback) that turns cultivation
 
 **Status:** v0.1 in development.
 
+---
+
+## In normal English (skip if you read code)
+
+**What this is**, in one paragraph: it's an app that runs inside Home Assistant. You write down your cultivation plan once (temp / RH / CO₂ / lights / irrigation / nutrients for every day of an 84-day cycle). The app applies the right day's settings every morning when the lights come on, watches what's actually happening with your plants, and either tells you when something's drifting, asks for permission to fix it, or just fixes it — depending on how much you trust it.
+
+### What the plants get
+- The recipe you wrote down, applied at the right time every day. Same as if you stood there with a clipboard, but without the clipboard.
+- Adjustments when something's wrong (temperature drifting, AC working too hard, nutrient dosing off). The app catches it before it becomes a yield problem.
+- Protection from sudden changes — the app physically can't make wild swings, no matter what an AI suggests.
+
+### What the operator gets
+- One screen showing every room's current state, the active recipe, and what the AI is thinking.
+- A planner where you draw out the 12-week recipe like a spreadsheet. Edit any day, click Save, the app handles applying it.
+- Telegram messages when something needs your attention (and only then — the app is built to not spam you).
+- A clear "approve / reject" flow when the AI wants to change something, so you stay in control.
+
+### What the QAP / compliance person gets
+- Every change ever made — by you, by the AI, by a scheduled run — is logged with who did it, when, what changed, and why.
+- The log can't be edited or deleted (it's cryptographically chained — tampering is detectable).
+- One-click export for inspectors, as PDF or spreadsheet, with proof the records weren't altered.
+- A formal "deviation" workflow when something goes wrong, that blocks the AI from getting more autonomy until you've reviewed the issue.
+- 14 validation documents (system description, risk assessment, change control, etc.) live in the private facility repo as the GACP evidence pack.
+
+### The AI safety story (in plain terms)
+The AI in this system is on a leash, not in charge. Specifically:
+- **The AI can never edit your recipe.** Your written plan is locked. The AI can only add temporary "nudges" that expire automatically.
+- **The AI can never change its own rules.** It can't loosen its own limits, change who has permission to do what, or extend the hours it's allowed to operate.
+- **The AI gets MORE autonomy over 8 weeks** as you build trust — starting at "report only" and only progressing if there are no problems and you approve the next step.
+- **If the AI tries to do something silly** (like turn the AC down when the AC is already maxed out), the app rejects it before any change happens.
+- **Equipment knows its limits.** The app understands that if your dehumidifier is already running flat-out and humidity isn't dropping, lowering the humidity target won't help — it'll suggest you check the dehumidifier instead.
+
+### What this is NOT
+- Not a replacement for your cultivator. It runs your plan; you write the plan.
+- Not an autonomous robot grower. The AI can suggest small adjustments within rules you set; it can't decide your strategy.
+- Not a substitute for SOPs or QAP oversight. It's the **tool** your SOP uses; the SOP is still yours.
+- Not validated software you can drop in and forget. The public version is a reference. The version you run in your facility is pinned, controlled, and validated by your QAP.
+- Not for sale, not a SaaS, not a cloud product. Runs on your hardware, on your network, with your data.
+
+---
+
 ## What it is
 
 - **HA add-on** — install via Supervisor, runs in your HA. Standalone Docker mode also supported.
