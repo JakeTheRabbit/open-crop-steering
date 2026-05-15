@@ -1,4 +1,4 @@
-"""Supervisor worker — the AI tick loop (Phase 7: Report mode).
+"""Supervisor worker — the AI tick loop (Report + SFW modes).
 
 The supervisor runs every ``supervisor_tick_seconds`` (plan: 5 min
 default). Under the ``supervisor_tick`` Postgres advisory lock — so only
@@ -24,17 +24,29 @@ walks the configured rooms and, for each:
    reply, and writes an :class:`~app.models.llm_call_log.LLMCallLog` row
    (prompt + raw response + parse outcome + validator errors).
 
-**Report mode guarantee.** Phase 7 ships ``report_only`` for every
-class. The supervisor writes an ``event_log`` row (severity by drift)
-and the ``LLMCallLog`` — and nothing else. It never adds a
-``runtime_adjustment`` overlay, never enqueues a ``command_queue`` row,
-never touches a setpoint. The only mutation outside its own logging is
-``room_runtime.last_tick_at`` / ``current_state`` bookkeeping. That the
-report path has no apply call at all is what makes the guarantee
-structural rather than policy.
+Per-class mode (Phase 8)
+------------------------
+Once a usable decision is parsed, the supervisor resolves the room's
+*effective mode* per proposed change via :func:`app.core.rollout.effective_mode`
+(rollout stage by parameter class):
+
+* **report_only** — the AI recommendation is logged + notifiable only;
+  no overlay, no command (the structural Report-mode guarantee — the
+  report path has no apply call at all).
+* **supervised_approval** (SFW) — if the decision carries a non-empty
+  proposal *and any* proposed change resolves to ``supervised_approval``,
+  the proposal is parked as a :class:`~app.models.pending_approval.PendingApproval`
+  via :func:`app.core.sfw.create_pending` (and pushed to Telegram if a
+  bot is wired). The supervisor still applies nothing itself — a human
+  decides.
+* **bounded_auto_adjust** (YOLO) — Phase 9. A no-op stub here.
+
+Every tick also sweeps expired pending approvals
+(:func:`app.core.sfw.expire_stale_pending`).
 
 The session factory, InfluxDB client, HA client and LLM client are all
-injected so tests drive the whole tick with fakes.
+injected so tests drive the whole tick with fakes; an optional Telegram
+bot is injected too (``None`` in tests / when Telegram is unconfigured).
 """
 
 from __future__ import annotations
@@ -56,12 +68,14 @@ from app.core.action_set import (
 )
 from app.core.locks import LockBusyError, advisory_lock
 from app.core.no_touch import NoTouchWindow, in_no_touch_window
+from app.core.rollout import class_for_param, effective_mode
 from app.core.room_runtime import (
     cycle_day_for,
     get_or_create,
     mark_ticked,
     update_state,
 )
+from app.core.sfw import create_pending, expire_stale_pending
 from app.core.snapshot import SnapshotRequest, build_snapshot
 from app.core.state_machine import RoomState
 from app.core.tolerance import check_room_tolerances
@@ -69,6 +83,7 @@ from app.llm_client import ChatMessage, LLMClientProtocol, parse_decision
 from app.models.audit_event import AuditEventType
 from app.models.event_log import EventLogEntry, EventSeverity
 from app.models.llm_call_log import LLMCallLog, LLMCallOutcome
+from app.models.runtime_adjustment import AdjustmentMode
 from app.prompts import system_prompt
 
 if TYPE_CHECKING:
@@ -132,6 +147,11 @@ class RoomTickResult:
         llm_call_id: The ``llm_call_log`` row id, if a call was made.
         outcome: The :class:`~app.models.llm_call_log.LLMCallOutcome`,
             if a call was made.
+        mode: The resolved effective mode for the room's proposal —
+            ``report_only`` / ``supervised_approval`` / ``bounded_auto_adjust``
+            — set once a decision was parsed.
+        pending_id: The :class:`~app.models.pending_approval.PendingApproval`
+            id created when the SFW path fired (``None`` otherwise).
     """
 
     room_id: str
@@ -142,10 +162,12 @@ class RoomTickResult:
     llm_called: bool = False
     llm_call_id: int | None = None
     outcome: LLMCallOutcome | None = None
+    mode: AdjustmentMode | None = None
+    pending_id: int | None = None
 
 
 class Supervisor:
-    """AI tick loop running in Report mode (Phase 7).
+    """AI tick loop running in Report + SFW modes (Phases 7-8).
 
     Args:
         session_factory: Zero-arg callable yielding an ``AsyncSession``
@@ -162,6 +184,9 @@ class Supervisor:
         no_touch_windows: Configured no-touch windows; a room is skipped
             when the tick time falls inside any of them.
         now_provider: Callable returning "now" — injectable for tests.
+        telegram_bot: Optional Telegram approval bot. When set, an SFW
+            pending approval is also pushed to Telegram; ``None`` (the
+            test / Telegram-unconfigured default) means UI-only routing.
     """
 
     def __init__(
@@ -174,6 +199,7 @@ class Supervisor:
         rooms_provider: Callable[[], Sequence[RoomTickInput]],
         no_touch_windows: Sequence[NoTouchWindow] | None = None,
         now_provider: Callable[[], dt.datetime] | None = None,
+        telegram_bot: Any = None,
     ) -> None:
         self._session_factory = session_factory
         self._influx = influx
@@ -182,6 +208,7 @@ class Supervisor:
         self._rooms_provider = rooms_provider
         self._no_touch_windows = list(no_touch_windows or [])
         self._now = now_provider or (lambda: dt.datetime.now(dt.UTC))
+        self._telegram_bot = telegram_bot
         self._stopped = asyncio.Event()
 
     # -- tick -------------------------------------------------------------
@@ -207,7 +234,14 @@ class Supervisor:
                 return []
 
     async def _tick_all_rooms(self) -> list[RoomTickResult]:
-        """Tick each configured room in its own transaction."""
+        """Tick each configured room in its own transaction.
+
+        A leading sweep expires any SFW pending approvals past their TTL
+        (plan: 90-min pending TTL) so a stale proposal cannot be approved
+        long after the snapshot it was built from went cold.
+        """
+        await self._sweep_expired_pending()
+
         rooms = list(self._rooms_provider())
         results: list[RoomTickResult] = []
         for room in rooms:
@@ -230,8 +264,29 @@ class Supervisor:
             "supervisor_tick_complete",
             rooms=len(rooms),
             llm_calls=sum(1 for r in results if r.llm_called),
+            pending_created=sum(1 for r in results if r.pending_id is not None),
         )
         return results
+
+    async def _sweep_expired_pending(self) -> int:
+        """Expire stale SFW pending approvals — once per tick.
+
+        Runs in its own transaction so an expiry sweep failure cannot
+        roll back a room tick (and vice versa).
+
+        Returns:
+            The number of pending rows expired.
+        """
+        try:
+            async with self._session_factory() as session:
+                expired = await expire_stale_pending(session)
+                await session.commit()
+        except Exception:  # a sweep failure must not kill the tick
+            log.exception("supervisor_pending_sweep_error")
+            return 0
+        if expired:
+            log.info("supervisor_pending_expired", count=expired)
+        return expired
 
     async def _tick_room(
         self, session: AsyncSession, room: RoomTickInput
@@ -280,13 +335,13 @@ class Supervisor:
                 in_band=True,
             )
 
-        # Out of band -> consult the LLM in Report mode.
+        # Out of band -> consult the LLM.
         action_set = build_action_set(
             snapshot,
             candidates=room.action_candidates or None,
         )
         result = await self._run_llm_report(
-            session, room, snapshot, action_set, breaches
+            session, room, runtime, snapshot, action_set, breaches
         )
         await mark_ticked(session, runtime, at=now)
         await update_state(session, runtime, RoomState.healthy)
@@ -359,18 +414,25 @@ class Supervisor:
         self,
         session: AsyncSession,
         room: RoomTickInput,
+        runtime: Any,
         snapshot: SensorSnapshot,
         action_set: list[Action],
         breaches: Sequence[Any],
     ) -> RoomTickResult:
-        """Call the LLM for an out-of-band room, parse strictly, log it.
+        """Call the LLM for an out-of-band room, parse strictly, route it.
 
-        Report mode: this writes an :class:`LLMCallLog` and an
-        ``event_log`` row and nothing else — no overlay, no command.
+        Always writes an :class:`LLMCallLog`. On a usable decision the
+        room's effective mode (rollout stage by proposed-change class)
+        decides routing: Report mode logs only; SFW mode parks a pending
+        approval; bounded-auto-adjust is a Phase-9 stub. No path here
+        applies a control change directly.
 
         Args:
             session: Active async session.
             room: The room's tick input.
+            runtime: The room's :class:`~app.models.room_runtime.RoomRuntime`
+                row — its ``rollout_stage`` drives effective-mode
+                resolution.
             snapshot: The snapshot built for the room.
             action_set: The deterministic allowed action set.
             breaches: The tolerance breaches that triggered the call.
@@ -428,14 +490,31 @@ class Supervisor:
         session.add(call_log)
         await session.flush()
 
-        if parse.ok and parse.decision is not None:
-            await self._record_report(
-                session, room.room_id, snapshot, call_log, parse.decision
-            )
-        else:
+        if not (parse.ok and parse.decision is not None):
             await self._record_degraded(
                 session, room.room_id, snapshot, call_log, parse.errors
             )
+            log.info(
+                "supervisor_llm_report",
+                room_id=room.room_id,
+                snapshot_id=snapshot.id,
+                llm_call_id=call_log.id,
+                outcome=parse.outcome.value,
+            )
+            return RoomTickResult(
+                room_id=room.room_id,
+                snapshot_id=snapshot.id,
+                llm_called=True,
+                llm_call_id=call_log.id,
+                outcome=parse.outcome,
+            )
+
+        # A usable decision -> resolve the room's effective mode for it
+        # and route accordingly (Report / SFW / bounded-auto-adjust).
+        mode = self._resolve_mode(runtime, parse.decision)
+        pending_id = await self._route_decision(
+            session, room, snapshot, call_log, parse.decision, mode
+        )
 
         log.info(
             "supervisor_llm_report",
@@ -443,6 +522,8 @@ class Supervisor:
             snapshot_id=snapshot.id,
             llm_call_id=call_log.id,
             outcome=parse.outcome.value,
+            mode=mode.value,
+            pending_id=pending_id,
         )
         return RoomTickResult(
             room_id=room.room_id,
@@ -450,7 +531,116 @@ class Supervisor:
             llm_called=True,
             llm_call_id=call_log.id,
             outcome=parse.outcome,
+            mode=mode,
+            pending_id=pending_id,
         )
+
+    @staticmethod
+    def _resolve_mode(runtime: Any, decision: Any) -> AdjustmentMode:
+        """Resolve the effective mode for a decision's proposed changes.
+
+        A decision's ``proposed_changes`` may span parameter classes; the
+        room is at one rollout stage. The effective mode for the decision
+        is the **most permissive** mode any proposed change resolves to
+        (rollout stage by that change's class — see
+        :func:`app.core.rollout.effective_mode`). An empty proposal — the
+        AI recommends no change — is ``report_only``: there is nothing to
+        approve or apply.
+
+        Args:
+            runtime: The room's ``RoomRuntime`` row (carries
+                ``rollout_stage``).
+            decision: The validated :class:`~app.schemas.llm_decision.LLMDecision`.
+
+        Returns:
+            The :class:`~app.models.runtime_adjustment.AdjustmentMode` the
+            decision should be routed under.
+        """
+        stage = getattr(runtime, "rollout_stage", "report_only")
+        # report_only < supervised_approval < bounded_auto_adjust
+        rank = {
+            AdjustmentMode.report_only: 0,
+            AdjustmentMode.supervised_approval: 1,
+            AdjustmentMode.bounded_auto_adjust: 2,
+        }
+        resolved = AdjustmentMode.report_only
+        for change in decision.proposed_changes:
+            if change.direction == "no_change" or change.delta == 0.0:
+                continue
+            mode = effective_mode(stage, class_for_param(change.param_name))
+            if rank[mode] > rank[resolved]:
+                resolved = mode
+        return resolved
+
+    async def _route_decision(
+        self,
+        session: AsyncSession,
+        room: RoomTickInput,
+        snapshot: SensorSnapshot,
+        call_log: LLMCallLog,
+        decision: Any,
+        mode: AdjustmentMode,
+    ) -> int | None:
+        """Route a usable decision per its resolved effective mode.
+
+        * ``report_only`` — write the report ``event_log`` row only.
+        * ``supervised_approval`` — also park a pending approval
+          (:func:`app.core.sfw.create_pending`) and, if a Telegram bot is
+          wired, push it. The supervisor still applies nothing.
+        * ``bounded_auto_adjust`` — Phase-9 stub: logs the report row and
+          does not apply (the validator + auto-apply land in Phase 9).
+
+        Returns:
+            The created pending-approval id when the SFW path fired,
+            else ``None``.
+        """
+        # Every routed decision still gets its report event_log row — the
+        # dashboard / digest surface is mode-independent.
+        await self._record_report(
+            session, room.room_id, snapshot, call_log, decision
+        )
+
+        if mode is not AdjustmentMode.supervised_approval:
+            # report_only and bounded_auto_adjust (P9 stub) apply nothing.
+            return None
+
+        pending = await create_pending(
+            session,
+            room_id=room.room_id,
+            proposal=self._proposal_payload(decision, snapshot),
+            snapshot_id=snapshot.id,
+            llm_call_id=call_log.id,
+            summary=f"AI proposal for {room.room_id}: {decision.human_summary}",
+        )
+        await self._notify_telegram(pending)
+        return pending.id
+
+    @staticmethod
+    def _proposal_payload(decision: Any, snapshot: SensorSnapshot) -> dict[str, Any]:
+        """Build the ``pending_approval.proposal`` payload from a decision.
+
+        The decision is serialised as-is, plus a ``day_index`` key — the
+        snapshot's cycle day — so :func:`app.core.sfw.approve_pending` can
+        place the overlay on the right recipe day without re-deriving it.
+        """
+        payload = decision.model_dump(mode="json")
+        payload["day_index"] = snapshot.cycle_day
+        return payload
+
+    async def _notify_telegram(self, pending: Any) -> None:
+        """Push an SFW pending approval to Telegram, if a bot is wired.
+
+        A Telegram send failure is logged but never fails the tick — the
+        pending row is already persisted and the UI can still decide it.
+        """
+        if self._telegram_bot is None:
+            return
+        try:
+            await self._telegram_bot.send_approval(pending)
+        except Exception:  # Telegram down must not fail the tick
+            log.exception(
+                "supervisor_telegram_send_failed", pending_id=pending.id
+            )
 
     @staticmethod
     def _build_user_message(
