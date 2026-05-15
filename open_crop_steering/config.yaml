@@ -1,0 +1,80 @@
+# Home Assistant add-on manifest — Open Crop Steering.
+#
+# One Docker container, s6-overlay process supervision (6 services:
+# postgres, api, supervisor, executor, alerts, seal). The same image runs
+# standalone (docker-compose.standalone.yml) — mode is detected at runtime
+# by the presence of SUPERVISOR_TOKEN (see backend/app/config.py).
+#
+# No auto-discovery: InfluxDB / LLM / Telegram are explicit config below.
+slug: open_crop_steering
+name: Open Crop Steering
+version: "0.1.0"
+description: >-
+  AI-supervised cannabis cultivation control plane — immutable recipe
+  revisions, bounded auto-adjust, tamper-evident audit chain.
+url: https://github.com/JakeTheRabbit/open-crop-steering
+# amd64 only in v0.1; aarch64 lands in v0.1.1 (see plan "deferred").
+arch:
+  - amd64
+# startup: services — this add-on provides long-running services rather
+# than a one-shot application.
+startup: services
+boot: auto
+# init: false — the image ships its own s6-overlay init; HA must not
+# inject its own.
+init: false
+# homeassistant_api: true grants a Supervisor-proxied HA API token
+# (SUPERVISOR_TOKEN) — the minimum needed for REST/WS calls. hassio_api
+# stays false: the add-on never calls the Supervisor API itself.
+homeassistant_api: true
+hassio_api: false
+# Ingress: HA proxies the UI under its own auth; ingress_port is the
+# in-container port the FastAPI app (api service) binds.
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:cannabis
+panel_title: Grow Control
+# Persistent + shared storage:
+#   addon_config:rw — /addon_config, add-on private config
+#   share          — /share, read shared HA data
+#   backup:rw      — /backup, the pre-backup cold-dump landing zone
+# Postgres data + seal exports live on the add-on's own /data volume,
+# which HA persists and includes in backups automatically.
+map:
+  - addon_config:rw
+  - share
+  - backup:rw
+# Default options shown in the add-on UI. Secrets (influx_token,
+# telegram_bot_token, hmac_key_current) default empty — the operator
+# fills them; the HMAC key is auto-generated on first boot if left blank
+# (see rootfs/etc/cont-init.d/10-options.sh).
+options:
+  log_level: info
+  llm_base_url: ""
+  llm_api_key: ""
+  llm_model: claude-opus-4-7
+  influx_url: ""
+  influx_token: ""
+  influx_org: ""
+  influx_bucket: homeassistant
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  hmac_key_current: ""
+  hmac_key_id_current: 1
+  seal_export_target: ""
+# Schema — HA validates the options against this. A trailing '?' marks a
+# field optional (may be empty). 'url?' validates URL syntax when set.
+schema:
+  log_level: list(trace|debug|info|notice|warning|error|fatal)?
+  llm_base_url: url?
+  llm_api_key: password?
+  llm_model: str?
+  influx_url: url?
+  influx_token: password?
+  influx_org: str?
+  influx_bucket: str?
+  telegram_bot_token: password?
+  telegram_chat_id: str?
+  hmac_key_current: password?
+  hmac_key_id_current: int?
+  seal_export_target: str?

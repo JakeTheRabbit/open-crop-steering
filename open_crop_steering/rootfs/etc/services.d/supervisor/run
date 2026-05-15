@@ -1,0 +1,29 @@
+#!/usr/bin/with-contenv bashio
+# =============================================================================
+# s6 service: supervisor — the AI tick loop worker.
+#
+# Runs the Report / SFW / bounded-auto-adjust tick every
+# supervisor_tick_seconds (plan Phases 7-9). Coordinated by a Postgres
+# advisory lock so only one tick fires even across restarts.
+#
+# Ordering: blocks until Postgres is up AND the api service's
+# /run/ocs-migrated marker exists (see the api run script).
+#
+# NOTE — this s6 service is named `supervisor`; it is unrelated to the HA
+# *Supervisor*. The add-on's worker is what this starts.
+# =============================================================================
+set -e
+
+# shellcheck disable=SC1091
+source /run/ocs.env
+
+bashio::log.info "supervisor: waiting for Postgres + migrations..."
+until pg_isready -h 127.0.0.1 -p 5432 -U ocs >/dev/null 2>&1; do
+  sleep 1
+done
+until [ -f /run/ocs-migrated ]; do
+  sleep 1
+done
+bashio::log.info "supervisor: dependencies ready; starting worker."
+
+exec python3 -m app.cli worker supervisor

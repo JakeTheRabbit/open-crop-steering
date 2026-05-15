@@ -1,0 +1,78 @@
+site_name: Open Crop Steering
+site_description: >-
+  HA add-on for AI-supervised cannabis cultivation — recipe-as-truth,
+  bounded AI overlays, tamper-evident audit.
+site_url: https://jaketherabbit.github.io/open-crop-steering/
+repo_url: https://github.com/JakeTheRabbit/open-crop-steering
+repo_name: JakeTheRabbit/open-crop-steering
+copyright: MIT licensed. Reference implementation — not validated software.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: green
+      accent: light green
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.tracking
+    - content.code.copy
+    - toc.follow
+    - search.suggest
+    - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Installation:
+      - HA add-on: installation/addon.md
+      - Standalone Docker: installation/standalone.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Recipes and overlays: concepts/recipes-and-overlays.md
+      - The audit chain: concepts/audit-chain.md
+      - AI control modes: concepts/ai-control-modes.md
+      - Cultivation knowledge: concepts/cultivation_knowledge.md
+  - Operations:
+      - Anti-patterns: operations/anti_patterns.md
+      - Coupling rules: operations/coupling_rules.md
+      - Saturation indicators: operations/saturation_indicators.md
+      - Alerts: operations/alerts.md
+      - Deviations: operations/deviations.md
+  - Compliance:
+      - Overview: compliance/overview.md
+  - API reference: api/index.md

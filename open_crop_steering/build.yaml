@@ -1,0 +1,15 @@
+# HA add-on build descriptor — maps each arch to its base image.
+#
+# v0.1 ships amd64 only (see plan "What's deferred to v0.2+": aarch64 in
+# v0.1.1). The base is the official HA Python base image, which already
+# bundles s6-overlay v3 + bashio — the Dockerfile's final stage builds
+# FROM the BUILD_FROM arg the Supervisor substitutes from this map.
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base-python:3.12-alpine3.21
+# Image name pattern published to ghcr.io on a tagged release.
+image: ghcr.io/jaketherabbit/{arch}-open-crop-steering
+# Build labels — surfaced by `docker inspect` / the add-on store.
+labels:
+  org.opencontainers.image.title: Open Crop Steering
+  org.opencontainers.image.source: https://github.com/JakeTheRabbit/open-crop-steering
+  org.opencontainers.image.licenses: MIT

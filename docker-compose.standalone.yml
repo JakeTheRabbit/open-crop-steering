@@ -1,0 +1,151 @@
+# =============================================================================
+# Open Crop Steering — standalone deployment (Phase 12).
+#
+# Runs the SAME image as the HA add-on, outside Home Assistant. Mode is
+# auto-detected: with no SUPERVISOR_TOKEN in the environment,
+# backend/app/config.py resolves `mode = "standalone"` and requires the
+# explicit HA_URL / HA_TOKEN below (a long-lived HA token, not a
+# Supervisor token).
+#
+# How the processes run standalone
+# --------------------------------
+# The add-on image bundles s6 + a local Postgres + all six services. In
+# standalone we DO NOT use s6's all-in-one supervision or the bundled
+# Postgres — instead each process is its own compose service, sharing the
+# image, with an explicit `entrypoint` that runs one `app.cli`
+# subcommand:
+#
+#   * `postgres`  — a dedicated external Postgres 16 service (this file).
+#   * `ocs-migrate` — runs `app.cli migrate` once and exits (a one-shot;
+#                     the api/worker services depend on it completing).
+#   * `ocs-api`     — `app.cli serve` (uvicorn / FastAPI + static UI).
+#   * `ocs-<name>`  — `app.cli worker <name>` for executor/supervisor/
+#                     alerts/seal.
+#
+# Compose's `depends_on: service_completed_successfully` gives the same
+# "workers wait for postgres + migrations" ordering the add-on's s6 run
+# scripts implement with explicit waits.
+#
+#   docker compose -f docker-compose.standalone.yml up -d --build
+#
+# Replace every CHANGE_ME and point INFLUX_* / LLM_* / HA_* / TELEGRAM_*
+# at your real services before bringing this up.
+# =============================================================================
+
+x-ocs-image: &ocs-image
+  build:
+    context: .
+    dockerfile: open_crop_steering/Dockerfile
+
+# Shared environment for every app process. Standalone config is entirely
+# env-var driven (the add-on's bashio options bridge is not used here).
+x-ocs-env: &ocs-env
+  # --- database (external Postgres, the `postgres` service below) ------
+  DATABASE_URL: postgresql+asyncpg://ocs:ocs@postgres:5432/open_crop_steering
+  # --- Home Assistant (standalone: long-lived token, NOT a Supervisor token)
+  HA_URL: https://homeassistant.example.com:8123
+  HA_TOKEN: CHANGE_ME_ha_long_lived_token
+  # --- InfluxDB 2.x ----------------------------------------------------
+  INFLUX_URL: http://influx:8086
+  INFLUX_TOKEN: CHANGE_ME_influx_token
+  INFLUX_ORG: CHANGE_ME_influx_org
+  INFLUX_BUCKET: homeassistant
+  # --- LLM (LiteLLM-compatible) ----------------------------------------
+  LLM_BASE_URL: http://litellm:4000
+  LLM_API_KEY: CHANGE_ME_llm_api_key
+  LLM_MODEL: claude-opus-4-7
+  # --- Telegram (optional — omit for dashboard-only alerts) ------------
+  TELEGRAM_BOT_TOKEN: ""
+  TELEGRAM_CHAT_ID: ""
+  # --- audit chain HMAC ------------------------------------------------
+  # Standalone: supply the key explicitly. Generate one with:
+  #   python -c "import secrets; print(secrets.token_hex(32))"
+  HMAC_KEY_1: CHANGE_ME_64_hex_chars
+  HMAC_KEY_ID_CURRENT: "1"
+  # --- misc ------------------------------------------------------------
+  LOG_LEVEL: info
+  SEAL_EXPORT_TARGET: ""
+
+services:
+  # --- external Postgres 16 ---------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ocs
+      POSTGRES_PASSWORD: ocs
+      POSTGRES_DB: open_crop_steering
+    volumes:
+      - ocs-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocs -d open_crop_steering"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # --- one-shot: run alembic upgrade head, then exit --------------------
+  ocs-migrate:
+    <<: *ocs-image
+    entrypoint: ["python", "-m", "app.cli", "migrate"]
+    environment: *ocs-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # --- FastAPI app + static UI ------------------------------------------
+  ocs-api:
+    <<: *ocs-image
+    entrypoint: ["python", "-m", "app.cli", "serve"]
+    environment: *ocs-env
+    ports:
+      - "8099:8099"
+    depends_on:
+      ocs-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8099/healthz').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  # --- workers — one compose service each, same image ------------------
+  ocs-executor:
+    <<: *ocs-image
+    entrypoint: ["python", "-m", "app.cli", "worker", "executor"]
+    environment: *ocs-env
+    depends_on:
+      ocs-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  ocs-supervisor:
+    <<: *ocs-image
+    entrypoint: ["python", "-m", "app.cli", "worker", "supervisor"]
+    environment: *ocs-env
+    depends_on:
+      ocs-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  ocs-alerts:
+    <<: *ocs-image
+    entrypoint: ["python", "-m", "app.cli", "worker", "alerts"]
+    environment: *ocs-env
+    depends_on:
+      ocs-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  ocs-seal:
+    <<: *ocs-image
+    entrypoint: ["python", "-m", "app.cli", "worker", "seal"]
+    environment: *ocs-env
+    depends_on:
+      ocs-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  ocs-pgdata:

@@ -1,0 +1,5 @@
+#!/usr/bin/with-contenv bashio
+# s6 finish: api. The API is the Ingress entrypoint; if it dies the
+# add-on is unusable, so halt the container and let HA restart it.
+bashio::log.warning "api: exited (code ${1}, signal ${2}) — halting container."
+exec /run/s6/basedir/bin/halt

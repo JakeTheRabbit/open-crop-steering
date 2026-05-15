@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Open Crop Steering operator theme.
+ *
+ * Dark by default — a control panel watched in dim grow-room
+ * anterooms. A light theme is wired (`.light` class on <html>) but the
+ * default is dark. Colours are HSL triplets consumed by
+ * tailwind.config.ts. The palette is intentionally low-chroma: status
+ * colours (healthy / impaired / critical) must read instantly against a
+ * calm, near-neutral surface.
+ */
+
+:root,
+.dark {
+  --background: 222 24% 8%;
+  --foreground: 210 18% 92%;
+
+  --card: 222 22% 11%;
+  --card-foreground: 210 18% 92%;
+
+  --popover: 222 22% 11%;
+  --popover-foreground: 210 18% 92%;
+
+  --muted: 222 16% 18%;
+  --muted-foreground: 215 14% 62%;
+
+  --border: 220 14% 22%;
+  --input: 220 14% 24%;
+  --ring: 152 42% 45%;
+
+  /* Primary: a calm cultivation green. */
+  --primary: 152 38% 44%;
+  --primary-foreground: 150 30% 97%;
+
+  --accent: 200 40% 40%;
+  --accent-foreground: 200 30% 97%;
+
+  --destructive: 0 62% 48%;
+  --destructive-foreground: 0 0% 98%;
+
+  /* Room-state + severity semantics. */
+  --healthy: 152 50% 50%;
+  --impaired: 38 88% 56%;
+  --critical: 0 72% 58%;
+
+  --radius: 0.5rem;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+.light {
+  --background: 210 20% 98%;
+  --foreground: 222 28% 14%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 28% 14%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 28% 14%;
+  --muted: 210 16% 93%;
+  --muted-foreground: 215 14% 40%;
+  --border: 214 18% 86%;
+  --input: 214 18% 84%;
+  --ring: 152 42% 40%;
+  --primary: 152 42% 38%;
+  --primary-foreground: 150 30% 98%;
+  --accent: 200 44% 38%;
+  --accent-foreground: 200 30% 98%;
+  --destructive: 0 66% 46%;
+  --destructive-foreground: 0 0% 98%;
+  --healthy: 152 52% 36%;
+  --impaired: 32 86% 42%;
+  --critical: 0 70% 46%;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-size: 14px;
+}
+
+/* Dense, legible numeric cells in the planner grid. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

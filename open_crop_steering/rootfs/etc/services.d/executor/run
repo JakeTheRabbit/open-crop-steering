@@ -1,0 +1,27 @@
+#!/usr/bin/with-contenv bashio
+# =============================================================================
+# s6 service: executor — the command-queue consumer worker.
+#
+# Drains command_queue into Home Assistant service calls + readback (plan
+# Phase 4). Coordinated with any other executor instance by a Postgres
+# advisory lock, so a restart is safe.
+#
+# Ordering: blocks until Postgres is up AND the api service has written
+# the /run/ocs-migrated marker — a worker must never touch an un-migrated
+# schema (see the api service's run script for the marker contract).
+# =============================================================================
+set -e
+
+# shellcheck disable=SC1091
+source /run/ocs.env
+
+bashio::log.info "executor: waiting for Postgres + migrations..."
+until pg_isready -h 127.0.0.1 -p 5432 -U ocs >/dev/null 2>&1; do
+  sleep 1
+done
+until [ -f /run/ocs-migrated ]; do
+  sleep 1
+done
+bashio::log.info "executor: dependencies ready; starting worker."
+
+exec python3 -m app.cli worker executor

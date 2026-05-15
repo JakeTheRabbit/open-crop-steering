@@ -1,0 +1,4 @@
+#!/usr/bin/with-contenv bashio
+# s6 finish: seal. A worker crash is not fatal — s6 restarts it. The
+# daily_seal.seal_date unique constraint makes a re-run idempotent.
+bashio::log.warning "seal: exited (code ${1}, signal ${2}) — s6 will restart it."

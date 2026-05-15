@@ -1,0 +1,3 @@
+#!/usr/bin/with-contenv bashio
+# s6 finish: supervisor. A worker crash is not fatal — s6 restarts it.
+bashio::log.warning "supervisor: exited (code ${1}, signal ${2}) — s6 will restart it."

@@ -1,0 +1,14 @@
+icon.png — PLACEHOLDER NOTE
+===========================
+
+The Home Assistant add-on store displays `icon.png` (square, 128x128 PNG
+recommended) and optionally `logo.png` for this add-on.
+
+A real binary PNG is intentionally NOT committed by this packaging pass —
+generating image assets is out of scope here. Before publishing the
+add-on, drop a real `open_crop_steering/icon.png` (and `logo.png`) into
+this directory. The `panel_icon: mdi:cannabis` in `config.yaml` is what
+HA uses for the sidebar entry; the store icon is separate.
+
+This `.README` file is a marker only and can be deleted once a real
+icon.png is added.

@@ -1,0 +1,5 @@
+#!/usr/bin/with-contenv bashio
+# s6 finish: executor. A worker crash must NOT take the container down —
+# s6 restarts the service on its own. Just log; the audit chain + command
+# queue are durable in Postgres, so a restart resumes cleanly.
+bashio::log.warning "executor: exited (code ${1}, signal ${2}) — s6 will restart it."

@@ -1,0 +1,41 @@
+#!/usr/bin/with-contenv bashio
+# =============================================================================
+# s6 service: api — the FastAPI app (+ static UI) under uvicorn.
+#
+# Ordering: s6 legacy services have no declarative `dependencies`, so the
+# ordering the plan calls for ("workers wait for postgres + migrations")
+# is implemented as explicit waits:
+#
+#   * THIS service blocks until Postgres accepts connections, then runs
+#     `python -m app.cli migrate` (alembic upgrade head) ONCE, then
+#     exec's `python -m app.cli serve`.
+#   * The four worker services each block until Postgres is up AND the
+#     migration marker file this service writes exists — so no worker
+#     ticks against an un-migrated schema.
+#
+# The migration marker (/run/ocs-migrated) lives on a tmpfs, so it is
+# re-created every container start — migrations run once per boot.
+# =============================================================================
+set -e
+
+# shellcheck disable=SC1091
+source /run/ocs.env
+
+MIGRATED_MARKER=/run/ocs-migrated
+
+# --- wait for the bundled Postgres -----------------------------------------
+bashio::log.info "api: waiting for PostgreSQL to accept connections..."
+until pg_isready -h 127.0.0.1 -p 5432 -U ocs >/dev/null 2>&1; do
+  sleep 1
+done
+bashio::log.info "api: PostgreSQL is ready."
+
+# --- run migrations once per boot ------------------------------------------
+bashio::log.info "api: running database migrations (alembic upgrade head)."
+python3 -m app.cli migrate
+touch "${MIGRATED_MARKER}"
+bashio::log.info "api: migrations complete."
+
+# --- serve -----------------------------------------------------------------
+bashio::log.info "api: starting FastAPI (uvicorn) on :8099."
+exec python3 -m app.cli serve

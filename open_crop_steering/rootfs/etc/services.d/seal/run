@@ -1,0 +1,26 @@
+#!/usr/bin/with-contenv bashio
+# =============================================================================
+# s6 service: seal — daily audit seal + off-box export + cold backup.
+#
+# Computes the previous day's tamper-evident seal record, writes the
+# sealed export under /data/audit-seal-exports, and (later) ships it
+# off-box (plan Phase 5 / locked decisions #6, #20).
+#
+# Ordering: blocks until Postgres is up AND the /run/ocs-migrated marker
+# exists (see the api run script).
+# =============================================================================
+set -e
+
+# shellcheck disable=SC1091
+source /run/ocs.env
+
+bashio::log.info "seal: waiting for Postgres + migrations..."
+until pg_isready -h 127.0.0.1 -p 5432 -U ocs >/dev/null 2>&1; do
+  sleep 1
+done
+until [ -f /run/ocs-migrated ]; do
+  sleep 1
+done
+bashio::log.info "seal: dependencies ready; starting worker."
+
+exec python3 -m app.cli worker seal

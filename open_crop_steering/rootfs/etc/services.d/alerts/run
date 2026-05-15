@@ -1,0 +1,27 @@
+#!/usr/bin/with-contenv bashio
+# =============================================================================
+# s6 service: alerts — severity-routed notifications + daily digest.
+#
+# Turns unacknowledged event_log rows into notifications (plan Phase 6 /
+# locked decision #18). Picks the TelegramNotifier when a bot token + chat
+# id are configured, else the NullNotifier (dashboard-only) — the CLI's
+# worker factory decides this from settings.
+#
+# Ordering: blocks until Postgres is up AND the /run/ocs-migrated marker
+# exists (see the api run script).
+# =============================================================================
+set -e
+
+# shellcheck disable=SC1091
+source /run/ocs.env
+
+bashio::log.info "alerts: waiting for Postgres + migrations..."
+until pg_isready -h 127.0.0.1 -p 5432 -U ocs >/dev/null 2>&1; do
+  sleep 1
+done
+until [ -f /run/ocs-migrated ]; do
+  sleep 1
+done
+bashio::log.info "alerts: dependencies ready; starting worker."
+
+exec python3 -m app.cli worker alerts

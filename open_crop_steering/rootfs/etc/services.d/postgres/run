@@ -1,0 +1,62 @@
+#!/usr/bin/with-contenv bashio
+# =============================================================================
+# s6 service: postgres — the bundled PostgreSQL 16 cluster.
+#
+# This is the first service to come up; the api + worker services wait on
+# it (their run scripts block on a readiness probe before exec'ing the
+# app — s6 legacy services have no declarative ordering, so the wait is
+# explicit).
+#
+# On first boot the cluster does not exist: `initdb` creates it on the
+# persistent /data/postgres volume, then the ocs role + database are
+# created. On every boot Postgres is exec'd into the foreground so s6
+# supervises it directly.
+# =============================================================================
+set -e
+
+# shellcheck disable=SC1091
+source /run/ocs.env
+
+PGDATA="${PGDATA:-/data/postgres}"
+PGBIN=/usr/libexec/postgresql16
+command -v "${PGBIN}/postgres" >/dev/null 2>&1 || PGBIN=/usr/bin
+
+bashio::log.info "postgres: data directory ${PGDATA}"
+
+# --- one-time cluster init -------------------------------------------------
+if [ ! -s "${PGDATA}/PG_VERSION" ]; then
+  bashio::log.info "postgres: initialising a new cluster (first boot)."
+  chown -R postgres:postgres "${PGDATA}"
+  chmod 700 "${PGDATA}"
+  su-exec postgres "${PGBIN}/initdb" \
+    --pgdata="${PGDATA}" \
+    --username=postgres \
+    --encoding=UTF8 \
+    --auth-local=trust \
+    --auth-host=trust
+
+  # Start a temporary local server to create the app role + database.
+  su-exec postgres "${PGBIN}/pg_ctl" \
+    --pgdata="${PGDATA}" \
+    --options="-c listen_addresses='127.0.0.1'" \
+    --wait start
+  su-exec postgres psql --username=postgres --dbname=postgres \
+    --command="CREATE ROLE ocs WITH LOGIN SUPERUSER PASSWORD 'ocs';"
+  su-exec postgres psql --username=postgres --dbname=postgres \
+    --command="CREATE DATABASE open_crop_steering OWNER ocs;"
+  su-exec postgres "${PGBIN}/pg_ctl" --pgdata="${PGDATA}" --wait stop
+  bashio::log.info "postgres: cluster initialised; ocs role + database created."
+fi
+
+chown -R postgres:postgres "${PGDATA}"
+chmod 700 "${PGDATA}"
+
+# --- run in the foreground under s6 ----------------------------------------
+# WAL durability matters for the audit chain (plan risk #1); the defaults
+# (synchronous_commit on, full_page_writes on) are kept. listen on
+# loopback only — nothing outside the container talks to Postgres.
+bashio::log.info "postgres: starting PostgreSQL 16."
+exec su-exec postgres "${PGBIN}/postgres" \
+  -D "${PGDATA}" \
+  -c listen_addresses='127.0.0.1' \
+  -c port=5432

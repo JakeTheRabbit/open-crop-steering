@@ -1,0 +1,73 @@
+# AppArmor profile — Open Crop Steering add-on (least-privilege).
+#
+# HA applies this when the host kernel supports AppArmor. The profile
+# confines the add-on container to exactly what it needs: run s6 + the
+# bundled Postgres + the Python app, read/write its own /data volume and
+# the mapped /addon_config /share /backup, and talk out over the network
+# (HA API, InfluxDB, LiteLLM, Telegram). Everything else is denied.
+
+#include <tunables/global>
+
+profile open_crop_steering flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # Capabilities — the minimum for s6 init + dropping to the postgres
+  # user (setuid/setgid) and Postgres' own needs (dac override for the
+  # data dir, fowner/chown on init).
+  capability setuid,
+  capability setgid,
+  capability dac_override,
+  capability dac_read_search,
+  capability fowner,
+  capability chown,
+  capability kill,
+  capability sys_chroot,
+  capability sys_ptrace,
+  capability audit_write,
+
+  # Network — outbound to HA / InfluxDB / LiteLLM / Telegram, plus the
+  # loopback Postgres socket.
+  network inet stream,
+  network inet6 stream,
+  network unix stream,
+
+  # s6-overlay + the with-contenv / bashio shells the run scripts use.
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /usr/libexec/** ix,
+  /usr/local/bin/** ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/s6-overlay/** rix,
+  /etc/cont-init.d/** rix,
+  /etc/services.d/** rix,
+
+  # Python runtime + the installed backend package.
+  /usr/lib/python3*/** r,
+  /usr/local/lib/python3*/** r,
+
+  # The baked-in static frontend export.
+  /opt/frontend/** r,
+
+  # Add-on data + bashio's view of options/config.
+  /data/** rwk,
+  /addon_config/** rwk,
+  /share/** rwk,
+  /backup/** rwk,
+  /run/** rwk,
+  /tmp/** rwk,
+  /var/run/postgresql/** rwk,
+
+  # Proc / sys — read-only bits s6 + Postgres touch.
+  /proc/ r,
+  /proc/** r,
+  /sys/kernel/mm/transparent_hugepage/enabled r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/nsswitch.conf r,
+  /etc/localtime r,
+}

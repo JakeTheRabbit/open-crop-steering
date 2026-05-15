@@ -1,0 +1,7 @@
+#!/usr/bin/with-contenv bashio
+# s6 finish: postgres. Postgres is the foundation service — if it exits,
+# nothing else can work, so bring the whole container down so HA restarts
+# it cleanly rather than leaving the api/workers spinning against a dead
+# database. ($1 is the exit code, $2 the signal.)
+bashio::log.warning "postgres: exited (code ${1}, signal ${2}) — halting container."
+exec /run/s6/basedir/bin/halt

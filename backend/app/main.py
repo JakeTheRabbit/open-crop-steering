@@ -1,19 +1,73 @@
-"""FastAPI application entrypoint."""
+"""FastAPI application entrypoint.
+
+Beyond wiring the API routers, this module mounts the static Next.js
+export (the planner UI) when it is present, so the add-on serves the
+whole UI under Home Assistant Ingress from the same process as the API.
+
+The static export is *optional*: in a dev / test checkout there is no
+``frontend/out/`` build, so the mount is skipped without erroring. In
+the packaged add-on the Dockerfile copies the export to
+``/opt/frontend`` and sets ``OCS_FRONTEND_DIR`` to point at it.
+"""
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI
 
-from app.api import admin, approvals, audit, health, knowledge, rollout
+from app.api import (
+    admin,
+    approvals,
+    audit,
+    config_wizard,
+    health,
+    knowledge,
+    rollout,
+)
 from app.config import get_settings
 from app.db import dispose_engine, get_engine
 from app.logging_config import configure_logging
 
 log = structlog.get_logger(__name__)
+
+
+def _candidate_frontend_dirs() -> list[Path]:
+    """Return the directories to probe for the static Next.js export.
+
+    Checked in order:
+
+    1. ``$OCS_FRONTEND_DIR`` — set by the add-on Dockerfile to the
+       baked-in export location (``/opt/frontend``).
+    2. ``frontend/out`` relative to the repo root (two levels above this
+       package's ``backend/`` dir) — a local ``npm run build`` checkout.
+
+    Returns:
+        Existing-or-not candidate paths, highest priority first.
+    """
+    candidates: list[Path] = []
+    env_dir = os.getenv("OCS_FRONTEND_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.append(repo_root / "frontend" / "out")
+    return candidates
+
+
+def _resolve_frontend_dir() -> Path | None:
+    """Return the first existing static-export dir, or ``None``.
+
+    ``None`` means no build is present — the SPA mount is skipped and the
+    app serves the API only (dev / test posture).
+    """
+    for candidate in _candidate_frontend_dirs():
+        if candidate.is_dir() and (candidate / "index.html").is_file():
+            return candidate
+    return None
 
 
 @asynccontextmanager
@@ -50,3 +104,59 @@ app.include_router(admin.router)
 app.include_router(approvals.router)
 app.include_router(knowledge.router)
 app.include_router(rollout.router)
+app.include_router(config_wizard.router)
+
+
+def _mount_static_ui(application: FastAPI) -> None:
+    """Mount the static Next.js export at ``/`` if a build is present.
+
+    The Next.js export is served SPA-style: a request that does not match
+    an API route or a real static file falls through to ``index.html``,
+    so client-side routing (``/planner/[room]`` etc.) works under Ingress.
+
+    This is wired *after* the API routers are included, so ``/api/*``,
+    ``/healthz`` and ``/readyz`` always win — the catch-all only sees a
+    path no router claimed. If no build directory exists (dev / test),
+    the mount is skipped entirely and the app serves the API only.
+
+    Args:
+        application: The FastAPI app to mount onto.
+    """
+    frontend_dir = _resolve_frontend_dir()
+    if frontend_dir is None:
+        log.info("static_ui_skip", reason="no frontend build directory found")
+        return
+
+    # Imported here so a checkout without the export still imports main
+    # cleanly even if starlette internals shift.
+    from starlette.staticfiles import StaticFiles  # noqa: PLC0415
+
+    class _SpaStaticFiles(StaticFiles):
+        """``StaticFiles`` that falls back to ``index.html`` on a 404.
+
+        A static export has no server router; an unmatched path is a
+        client-side route, so we serve the SPA shell instead of a 404.
+        """
+
+        async def get_response(self, path: str, scope: object):  # type: ignore[no-untyped-def, override]
+            from starlette.exceptions import (  # noqa: PLC0415
+                HTTPException as StarletteHTTPException,
+            )
+
+            try:
+                return await super().get_response(path, scope)  # type: ignore[arg-type]
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:  # noqa: PLR2004 — only 404 -> SPA shell
+                    raise
+                return await super().get_response("index.html", scope)  # type: ignore[arg-type]
+
+    application.mount(
+        "/",
+        _SpaStaticFiles(directory=str(frontend_dir), html=True),
+        name="ui",
+    )
+    log.info("static_ui_mounted", directory=str(frontend_dir))
+
+
+# Mount last so the SPA catch-all never shadows an API route.
+_mount_static_ui(app)
