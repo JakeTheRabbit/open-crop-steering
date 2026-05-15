@@ -77,6 +77,7 @@ class Settings(BaseSettings):
 
     # --- Telegram --------------------------------------------------------
     telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
     # --- Audit / HMAC ----------------------------------------------------
     hmac_key_id_current: int = 1
