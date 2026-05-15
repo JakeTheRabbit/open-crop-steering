@@ -1,0 +1,19 @@
+# Normalize line endings — the repo stores LF; everything checks out LF.
+# Critical: shell scripts + s6 service files run inside a Linux container,
+# so they MUST be LF even on a Windows working copy or the add-on breaks
+# (`/usr/bin/env: 'bash\r'`).
+* text=auto eol=lf
+
+# Explicit LF for the files that run in the container
+*.sh        text eol=lf
+*.py        text eol=lf
+Dockerfile  text eol=lf
+open_crop_steering/rootfs/** text eol=lf
+
+# Binary assets — never touch
+*.png  binary
+*.ico  binary
+*.jpg  binary
+*.gz   binary
+*.whl  binary
+*.zip  binary
