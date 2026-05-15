@@ -51,13 +51,16 @@ from sqlalchemy import select, update
 
 from app.core.audit import log_audit
 from app.core.command_queue import enqueue_batch
+from app.core.coupling_rules import RoomConfig
 from app.core.effective import effective_target
+from app.core.guardrails import OUTCOME_DEFER, validate_all
 from app.core.overlays import add_adjustment
 from app.models.audit_event import AuditEventType
 from app.models.pending_approval import PendingApproval, PendingStatus
 from app.models.recipe_revision import RecipeRevision, RecipeStatus
 from app.models.runtime_adjustment import AdjustmentMode, AdjustmentSource
 from app.models.sensor_snapshot import SensorSnapshot
+from app.schemas.llm_decision import ProposedChange as LLMProposedChange
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,16 +142,22 @@ def _extract_changes(proposal: dict[str, Any]) -> list[ProposedChange]:
     return changes
 
 
-def recheck_proposal(
+async def recheck_proposal(
+    session: AsyncSession,
     snapshot: SensorSnapshot | None,
     pending: PendingApproval,
     active_revision: RecipeRevision | None,
+    *,
+    room_config: RoomConfig | dict[str, Any] | None = None,
 ) -> RecheckResult:
-    """Basic consistency re-check, run when a pending approval is decided.
+    """Re-check a pending approval at decision time — basic + guardrails.
 
     The room's state may have shifted between the supervisor building the
-    snapshot and a human getting around to approving the pending row.
-    This Phase-8 re-check is deliberately *basic* — it confirms only that:
+    snapshot and a human getting around to approving the pending row, so
+    an SFW approval is **re-validated** before it is applied. The
+    re-check runs in two stages:
+
+    *Basic consistency* (Phase 8) — confirms that:
 
     1. the originating :class:`SensorSnapshot` still exists;
     2. the room's active approved ``recipe_revision`` is the **same**
@@ -156,23 +165,27 @@ def recheck_proposal(
        revision invalidates the proposal — plan risk #4);
     3. every proposed ``delta`` is a finite number.
 
-    .. note::
-       **Phase 9 plugs the full guardrail / anti-pattern validator into
-       this same function.** Phase 9's
-       ``guardrails.validate_all(proposal, snapshot, cumulative_state)``
-       — cumulative-delta caps, cool-downs, no-touch windows, the
-       anti-pattern (AP-01..AP-12) and coupling-rule (EC-001..EC-015)
-       checks — belongs here, extending (not replacing) the three basic
-       checks below. The lifecycle in :func:`approve_pending` already
-       treats a failing re-check as a rejection, so Phase 9 only has to
-       widen what counts as a failure.
+    *Guardrail validation* (Phase 9) — every proposed change is then run
+    through :func:`app.core.guardrails.validate_all`: the anti-pattern
+    (AP-01..AP-12) and coupling-rule (EC-001..EC-015) checks, the
+    absolute bounds, and the cumulative caps. An SFW approval that would
+    trip a guardrail at apply time is **not** applied — the re-check
+    fails and :func:`approve_pending` rejects the pending row. A
+    guardrail ``defer`` (cool-down / no-touch) is not a failure here:
+    the human is deciding now and is allowed to (the deferral logic is
+    for the *autonomous* bounded path), so a ``defer`` verdict passes
+    the re-check.
 
     Args:
+        session: Active async session — :func:`validate_all` reads /
+            writes the ``cumulative_delta`` row.
         snapshot: The :class:`SensorSnapshot` the proposal was built from
             (``None`` if it has since been deleted).
         pending: The pending approval being decided.
         active_revision: The room's current active approved revision
             (``None`` if the room has none).
+        room_config: The room's static equipment / coupling map for the
+            coupling-rule checks (``None`` == an all-defaults config).
 
     Returns:
         A :class:`RecheckResult` — ``ok`` true when the proposal may
@@ -206,7 +219,8 @@ def recheck_proposal(
             ),
         )
 
-    for change in _extract_changes(pending.proposal):
+    changes = _extract_changes(pending.proposal)
+    for change in changes:
         if not math.isfinite(change.delta):
             return RecheckResult(
                 ok=False,
@@ -217,7 +231,59 @@ def recheck_proposal(
                 ),
             )
 
+    # Phase 9: every change must still pass the guardrails at apply time.
+    for change in changes:
+        verdict = await validate_all(
+            session,
+            change=_as_llm_change(change),
+            snapshot=snapshot,
+            room_config=room_config,
+            allowed_action_set=None,
+            room_id=pending.room_id,
+        )
+        # A rejection means the proposal is no longer safe to apply.
+        # A deferral (cool-down / no-touch) does NOT block a *human*
+        # approval — the deferral guard is for the autonomous path.
+        if verdict.rejected:
+            return RecheckResult(
+                ok=False,
+                reason=(
+                    verdict.reason_codes[0]
+                    if verdict.reason_codes
+                    else "guardrail_rejection"
+                ),
+                detail=verdict.detail,
+            )
+        if verdict.outcome == OUTCOME_DEFER:
+            log.info(
+                "sfw_recheck_guardrail_defer_allowed",
+                pending_id=pending.id,
+                param_name=change.param_name,
+            )
+
     return RecheckResult(ok=True)
+
+
+def _as_llm_change(change: ProposedChange) -> LLMProposedChange:
+    """Adapt an SFW :class:`ProposedChange` to the LLM schema's one.
+
+    :func:`app.core.guardrails.validate_all` is typed against
+    :class:`app.schemas.llm_decision.ProposedChange`; the SFW lifecycle
+    works with its own lighter :class:`ProposedChange`. This bridges the
+    two — the direction is recovered from the delta's sign.
+    """
+    direction = (
+        "increase"
+        if change.delta > 0
+        else "decrease"
+        if change.delta < 0
+        else "no_change"
+    )
+    return LLMProposedChange(
+        param_name=change.param_name,
+        direction=direction,
+        delta=change.delta,
+    )
 
 
 async def _active_revision(
@@ -487,7 +553,9 @@ async def approve_pending(
 
     snapshot = await session.get(SensorSnapshot, pending.snapshot_id)
     active_revision = await _active_revision(session, pending.room_id)
-    recheck = recheck_proposal(snapshot, pending, active_revision)
+    recheck = await recheck_proposal(
+        session, snapshot, pending, active_revision
+    )
 
     if not recheck.ok:
         # Re-check failed: keep the row but reject it with the reason.

@@ -420,13 +420,13 @@ async def test_recheck_fails_when_recipe_revision_changed(
             .limit(1)
         )
     ).scalar_one()
-    result = recheck_proposal(snapshot, pending, active)
+    result = await recheck_proposal(session, snapshot, pending, active)
     assert result.ok is False
     assert result.reason == "recipe_revision_changed"
 
     # And the re-check holds when the active revision still matches.
     same = await session.get(RecipeRevision, rev1)
-    ok_result = recheck_proposal(snapshot, pending, same)
+    ok_result = await recheck_proposal(session, snapshot, pending, same)
     assert ok_result.ok is True
 
 

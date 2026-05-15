@@ -21,25 +21,41 @@ Below a class's ``bounded_auto_adjust`` stage there is an intermediate
 class moves from report-only to supervised approval. Stage 0/1 is
 report-only for everything.
 
-Phase 7 scope: this module is **read-side only**. It exposes
-:func:`effective_mode` (what mode applies to a class at a stage) and
-:func:`current_stage` (the stage a room is at). Stage *advancement* —
-the QAP-gated transition between stages — is Phase 9.
+Read-side: :func:`effective_mode` (what mode applies to a class at a
+stage) and :func:`current_stage` (the stage a room is at).
+
+Phase 9 adds the **write side** — the QAP-gated stage advancement:
+
+* :func:`can_advance` — evaluates the rollout gates for a room; the
+  load-bearing one (REQ-010) is "no unresolved formal deviation".
+* :func:`advance_stage` — bumps ``room_runtime.rollout_stage`` by one
+  rung when :func:`can_advance` passes, writing a ``rollout_advanced``
+  audit row.
 
 v0.1 ships every room at the report-only stage
 (:data:`app.models.room_runtime.DEFAULT_ROLLOUT_STAGE`), so in practice
-:func:`effective_mode` returns ``report_only`` for every class until an
-admin advances the room.
+:func:`effective_mode` returns ``report_only`` for every class until a
+QAP advances the room.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import structlog
+from sqlalchemy import func, select
 
+from app.core.audit import log_audit
+from app.models.audit_event import AuditEvent, AuditEventType
+from app.models.event_log import EventLogEntry
+from app.models.room_runtime import RoomRuntime
 from app.models.runtime_adjustment import AdjustmentMode
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
@@ -85,6 +101,13 @@ PARAM_CLASSES: dict[str, ParamClass] = {
     "tank_ph": ParamClass.d,
     "tank_ec": ParamClass.d,
     "leaf_temp": ParamClass.d,
+    # --- Class E: admin / control state (the AI never writes these) ----
+    "rollout_stage": ParamClass.e,
+    "cycle_start": ParamClass.e,
+    "cycle_start_date": ParamClass.e,
+    "no_touch_window": ParamClass.e,
+    "guardrail_bounds": ParamClass.e,
+    "role_mapping": ParamClass.e,
 }
 
 
@@ -226,3 +249,259 @@ def _coerce_stage(stage: RolloutStage | str | int) -> RolloutStage:
         log.warning("rollout_unknown_stage_index", index=stage)
         return REPORT_ONLY_STAGE
     return stage_by_name(stage)
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 — QAP-gated rollout-stage advancement.
+# ---------------------------------------------------------------------------
+
+#: Minimum days a room must sit at a rollout stage before it may advance
+#: (plan Phase 14 gate: ">= 5 days at stage"). The supervisor's
+#: ``last_tick_at`` is not a stage-entry timestamp, so the per-stage dwell
+#: gate is *recorded* here and *checked* once a stage-entry timestamp
+#: lands (see :class:`AdvanceCheck.min_days_at_stage_met`).
+MIN_DAYS_AT_STAGE = 5
+
+#: Maximum SFW (supervised-approval) rejections in the trailing 7 days
+#: that still permits an advance (plan Phase 14 gate: "< 3 SFW
+#: rejections last 7 days").
+MAX_SFW_REJECTIONS_7D = 3
+
+#: Trailing window for the SFW-rejection gate.
+_SFW_REJECTION_WINDOW = dt.timedelta(days=7)
+
+
+@dataclass(slots=True)
+class AdvanceCheck:
+    """The outcome of evaluating a room's rollout-advance gates.
+
+    The advance is permitted only when :attr:`can_advance` is ``True``.
+    Plan locked decision #16 / Phase 14 lists several gates; Phase 9
+    *enforces* the formal-deviation gate (REQ-010) and *records* the
+    others as fields so the UI can show the full picture and later
+    phases can wire the remaining checks without changing this contract.
+
+    Attributes:
+        room_id: The room the check is for.
+        can_advance: ``True`` iff every *enforced* gate passes — Phase 9
+            enforces :attr:`no_open_deviations`. The advisory gates
+            (dwell time, SFW rejections, QAP approval) are surfaced but
+            do not by themselves block in Phase 9.
+        current_stage: The room's current rollout stage.
+        next_stage: The stage an advance would move to (``None`` if the
+            room is already at the final stage).
+        no_open_deviations: ``True`` iff the room has **no** unresolved
+            formal deviation — the load-bearing REQ-010 gate. ``False``
+            blocks the advance outright.
+        open_deviation_count: Number of unresolved formal deviations for
+            the room.
+        sfw_rejections_7d: SFW rejections in the trailing 7 days.
+        sfw_rejection_gate_met: ``True`` iff ``sfw_rejections_7d`` is
+            below :data:`MAX_SFW_REJECTIONS_7D` (advisory in Phase 9).
+        min_days_at_stage_met: ``True`` iff the dwell-time gate is
+            satisfied. Phase 9 cannot compute stage dwell (no
+            stage-entry timestamp yet), so this defaults to ``True`` and
+            is documented as a later wiring point.
+        qap_approval_recorded: ``True`` iff a QAP has recorded approval
+            for this advance. In Phase 9 the QAP *calling* the advance
+            endpoint **is** the recorded approval, so this is set by
+            :func:`advance_stage`.
+        blockers: Human-readable reasons the advance is blocked (empty
+            when :attr:`can_advance`).
+    """
+
+    room_id: str
+    can_advance: bool
+    current_stage: RolloutStage
+    next_stage: RolloutStage | None
+    no_open_deviations: bool
+    open_deviation_count: int = 0
+    sfw_rejections_7d: int = 0
+    sfw_rejection_gate_met: bool = True
+    min_days_at_stage_met: bool = True
+    qap_approval_recorded: bool = False
+    blockers: list[str] = field(default_factory=list)
+
+
+def next_stage(stage: RolloutStage) -> RolloutStage | None:
+    """Return the stage one rung above ``stage`` (``None`` at the top)."""
+    nxt = stage.index + 1
+    if nxt < len(ROLLOUT_STAGES):
+        return ROLLOUT_STAGES[nxt]
+    return None
+
+
+async def _open_deviation_count(session: AsyncSession, room_id: str) -> int:
+    """Count unresolved (unacknowledged) formal deviations for a room."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(EventLogEntry)
+        .where(
+            EventLogEntry.event_type == AuditEventType.formal_deviation,
+            EventLogEntry.room_id == room_id,
+            EventLogEntry.acknowledged_at.is_(None),
+        )
+    )
+    return int(count or 0)
+
+
+async def _sfw_rejections_7d(session: AsyncSession, room_id: str) -> int:
+    """Count SFW (supervised-approval) rejections for a room in the last 7d.
+
+    An SFW rejection on a failed re-check is audited as a
+    ``guardrail_rejection`` carrying a ``pending_id`` in ``params``; a
+    plain SFW reject is an ``info_event`` with ``decision == 'rejected'``.
+    The advance gate counts the former — re-check failures are the
+    quality signal the plan's gate cares about.
+    """
+    since = dt.datetime.now(dt.UTC) - _SFW_REJECTION_WINDOW
+    count = await session.scalar(
+        select(func.count())
+        .select_from(AuditEvent)
+        .where(
+            AuditEvent.event_type == AuditEventType.guardrail_rejection,
+            AuditEvent.room_id == room_id,
+            AuditEvent.occurred_at >= since,
+            AuditEvent.params["pending_id"].astext.isnot(None),
+        )
+    )
+    return int(count or 0)
+
+
+async def can_advance(session: AsyncSession, room_id: str) -> AdvanceCheck:
+    """Evaluate whether a room may advance its rollout stage.
+
+    The **enforced** gate (plan REQ-010) is: a room with any unresolved
+    formal deviation may not advance. Plan Phase 14 lists further gates
+    (>= 5 days at stage, < 3 SFW rejections / 7d, QAP-recorded approval);
+    Phase 9 *records* those on the returned :class:`AdvanceCheck` —
+    ``sfw_rejections_7d`` is queried live, the dwell gate is documented
+    as a later wiring point, QAP approval is supplied by the advance
+    call itself — but only the formal-deviation gate blocks here.
+
+    Args:
+        session: Active async session.
+        room_id: The room to evaluate.
+
+    Returns:
+        An :class:`AdvanceCheck` — ``can_advance`` is ``True`` only when
+        every enforced gate passes and the room is not already at the
+        final stage.
+    """
+    runtime = await session.get(RoomRuntime, room_id)
+    stage = (
+        current_stage(runtime)
+        if runtime is not None
+        else REPORT_ONLY_STAGE
+    )
+    nxt = next_stage(stage)
+
+    open_count = await _open_deviation_count(session, room_id)
+    no_open = open_count == 0
+    sfw_rejections = await _sfw_rejections_7d(session, room_id)
+    sfw_gate_met = sfw_rejections < MAX_SFW_REJECTIONS_7D
+
+    blockers: list[str] = []
+    if not no_open:
+        blockers.append(
+            f"{open_count} unresolved formal deviation(s) — must be "
+            "acknowledged by a QAP before advancing (REQ-010)"
+        )
+    if nxt is None:
+        blockers.append(
+            f"room is already at the final rollout stage ({stage.name})"
+        )
+
+    permitted = no_open and nxt is not None
+
+    check = AdvanceCheck(
+        room_id=room_id,
+        can_advance=permitted,
+        current_stage=stage,
+        next_stage=nxt,
+        no_open_deviations=no_open,
+        open_deviation_count=open_count,
+        sfw_rejections_7d=sfw_rejections,
+        sfw_rejection_gate_met=sfw_gate_met,
+        blockers=blockers,
+    )
+    log.info(
+        "rollout_advance_checked",
+        room_id=room_id,
+        can_advance=permitted,
+        current_stage=stage.name,
+        open_deviations=open_count,
+        sfw_rejections_7d=sfw_rejections,
+    )
+    return check
+
+
+async def advance_stage(
+    session: AsyncSession, room_id: str, *, qap_user: str
+) -> RoomRuntime:
+    """Advance a room one rollout-stage rung — QAP-gated.
+
+    Runs :func:`can_advance`; if every enforced gate passes, bumps
+    ``room_runtime.rollout_stage`` to the next rung and writes a
+    ``rollout_advanced`` audit event. The QAP making this call **is**
+    the plan's "QAP-recorded approval" gate — their id is the audit
+    ``actor_id``.
+
+    Args:
+        session: Active async session.
+        room_id: The room to advance.
+        qap_user: ``users.id`` of the advancing QAP (the caller has
+            already role-checked them).
+
+    Returns:
+        The updated :class:`~app.models.room_runtime.RoomRuntime` row.
+
+    Raises:
+        ValueError: If the room cannot advance — an unresolved formal
+            deviation, or the room is already at the final stage. The
+            message names every blocker.
+    """
+    check = await can_advance(session, room_id)
+    if not check.can_advance:
+        raise ValueError(
+            f"room {room_id} cannot advance rollout stage: "
+            + "; ".join(check.blockers)
+        )
+    assert check.next_stage is not None  # can_advance guarantees this
+
+    runtime = await session.get(RoomRuntime, room_id)
+    if runtime is None:
+        # A never-ticked room: create the row so the advance is durable.
+        runtime = RoomRuntime(room_id=room_id)
+        session.add(runtime)
+        await session.flush()
+
+    from_stage = check.current_stage
+    runtime.rollout_stage = check.next_stage.name
+    await session.flush()
+
+    await log_audit(
+        session,
+        event_type=AuditEventType.rollout_advanced,
+        actor_id=qap_user,
+        actor_role="qap",
+        room_id=room_id,
+        summary=(
+            f"Rollout advanced for {room_id}: {from_stage.name} -> "
+            f"{check.next_stage.name} (by QAP {qap_user})"
+        ),
+        params={
+            "from_stage": from_stage.name,
+            "from_stage_index": from_stage.index,
+            "to_stage": check.next_stage.name,
+            "to_stage_index": check.next_stage.index,
+        },
+    )
+    log.info(
+        "rollout_advanced",
+        room_id=room_id,
+        from_stage=from_stage.name,
+        to_stage=check.next_stage.name,
+        qap_user=qap_user,
+    )
+    return runtime

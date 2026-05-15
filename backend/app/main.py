@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
-from app.api import admin, approvals, audit, health, knowledge
+from app.api import admin, approvals, audit, health, knowledge, rollout
 from app.config import get_settings
 from app.db import dispose_engine, get_engine
 from app.logging_config import configure_logging
@@ -49,3 +49,4 @@ app.include_router(audit.router)
 app.include_router(admin.router)
 app.include_router(approvals.router)
 app.include_router(knowledge.router)
+app.include_router(rollout.router)

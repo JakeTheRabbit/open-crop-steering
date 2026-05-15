@@ -39,7 +39,14 @@ Once a usable decision is parsed, the supervisor resolves the room's
   via :func:`app.core.sfw.create_pending` (and pushed to Telegram if a
   bot is wired). The supervisor still applies nothing itself — a human
   decides.
-* **bounded_auto_adjust** (YOLO) — Phase 9. A no-op stub here.
+* **bounded_auto_adjust** (YOLO) — Phase 9. Each proposed change runs
+  through the guardrail validator (:func:`app.core.guardrails.validate_all`);
+  an ``apply`` / ``apply_novel`` verdict adds a runtime overlay
+  (:func:`app.core.overlays.add_adjustment`) and enqueues a command
+  batch (:func:`app.core.command_queue.enqueue_batch`); a ``reject``
+  writes a ``guardrail_rejection`` event and runs the same-``AP``
+  pattern detector (:func:`app.core.guardrails.detect_rejection_pattern`);
+  a ``defer`` is logged and skipped.
 
 Every tick also sweeps expired pending approvals
 (:func:`app.core.sfw.expire_stale_pending`).
@@ -66,8 +73,18 @@ from app.core.action_set import (
     action_set_to_payload,
     build_action_set,
 )
+from app.core.audit import log_audit
+from app.core.command_queue import enqueue_batch
+from app.core.coupling_rules import RoomConfig
+from app.core.effective import effective_target
+from app.core.guardrails import (
+    GuardrailDecision,
+    detect_rejection_pattern,
+    validate_all,
+)
 from app.core.locks import LockBusyError, advisory_lock
 from app.core.no_touch import NoTouchWindow, in_no_touch_window
+from app.core.overlays import add_adjustment
 from app.core.rollout import class_for_param, effective_mode
 from app.core.room_runtime import (
     cycle_day_for,
@@ -83,7 +100,11 @@ from app.llm_client import ChatMessage, LLMClientProtocol, parse_decision
 from app.models.audit_event import AuditEventType
 from app.models.event_log import EventLogEntry, EventSeverity
 from app.models.llm_call_log import LLMCallLog, LLMCallOutcome
-from app.models.runtime_adjustment import AdjustmentMode
+from app.models.runtime_adjustment import (
+    AdjustmentMode,
+    AdjustmentSource,
+)
+from app.models.user import User
 from app.prompts import system_prompt
 
 if TYPE_CHECKING:
@@ -99,8 +120,14 @@ log = structlog.get_logger(__name__)
 #: Advisory-lock name — only one supervisor ticks at a time.
 _LOCK_NAME = "supervisor_tick"
 
-#: Worker identity in the event / audit trail.
+#: Worker identity in the event / audit trail. Also the ``users.id`` of
+#: the system user the bounded-auto-adjust path attributes overlays to —
+#: a ``runtime_adjustment.created_by`` FK must resolve, and an
+#: AI-applied overlay has no human creator.
 _ACTOR = "supervisor"
+
+#: Display name for the lazily-created supervisor system user.
+_SYSTEM_USER_DISPLAY_NAME = "Supervisor (AI worker)"
 
 #: Type alias: a zero-arg callable returning an AsyncSession context manager.
 SessionFactory = Callable[[], "AbstractAsyncContextManager[AsyncSession]"]
@@ -122,6 +149,9 @@ class RoomTickInput:
             from the snapshot payload.
         sensor_entities: Extra InfluxDB ``entity_id`` tags to capture in
             the snapshot beyond those implied by ``room_context``.
+        room_config: The room's static equipment / coupling map, used by
+            the Phase-9 bounded-auto-adjust validator's coupling-rule
+            checks. ``None`` means an all-defaults config.
     """
 
     room_id: str
@@ -130,6 +160,7 @@ class RoomTickInput:
     lights_on: bool = True
     action_candidates: list[ParamCandidate] = field(default_factory=list)
     sensor_entities: Sequence[str] = field(default_factory=tuple)
+    room_config: RoomConfig | None = None
 
 
 @dataclass(slots=True)
@@ -152,6 +183,9 @@ class RoomTickResult:
             — set once a decision was parsed.
         pending_id: The :class:`~app.models.pending_approval.PendingApproval`
             id created when the SFW path fired (``None`` otherwise).
+        guardrail_decisions: One :class:`~app.core.guardrails.GuardrailDecision`
+            per proposed change processed in ``bounded_auto_adjust`` mode
+            (empty for Report / SFW ticks).
     """
 
     room_id: str
@@ -164,6 +198,9 @@ class RoomTickResult:
     outcome: LLMCallOutcome | None = None
     mode: AdjustmentMode | None = None
     pending_id: int | None = None
+    guardrail_decisions: list[GuardrailDecision] = field(
+        default_factory=list
+    )
 
 
 class Supervisor:
@@ -341,7 +378,7 @@ class Supervisor:
             candidates=room.action_candidates or None,
         )
         result = await self._run_llm_report(
-            session, room, runtime, snapshot, action_set, breaches
+            session, room, runtime, snapshot, action_set, breaches, now
         )
         await mark_ticked(session, runtime, at=now)
         await update_state(session, runtime, RoomState.healthy)
@@ -418,14 +455,15 @@ class Supervisor:
         snapshot: SensorSnapshot,
         action_set: list[Action],
         breaches: Sequence[Any],
+        now: dt.datetime,
     ) -> RoomTickResult:
         """Call the LLM for an out-of-band room, parse strictly, route it.
 
         Always writes an :class:`LLMCallLog`. On a usable decision the
         room's effective mode (rollout stage by proposed-change class)
         decides routing: Report mode logs only; SFW mode parks a pending
-        approval; bounded-auto-adjust is a Phase-9 stub. No path here
-        applies a control change directly.
+        approval; bounded-auto-adjust runs the Phase-9 guardrail
+        validator and may auto-apply.
 
         Args:
             session: Active async session.
@@ -436,6 +474,8 @@ class Supervisor:
             snapshot: The snapshot built for the room.
             action_set: The deterministic allowed action set.
             breaches: The tolerance breaches that triggered the call.
+            now: The tick time — passed to the Phase-9 guardrail
+                validator for cool-down / cumulative-window arithmetic.
 
         Returns:
             A :class:`RoomTickResult` describing the call.
@@ -512,8 +552,8 @@ class Supervisor:
         # A usable decision -> resolve the room's effective mode for it
         # and route accordingly (Report / SFW / bounded-auto-adjust).
         mode = self._resolve_mode(runtime, parse.decision)
-        pending_id = await self._route_decision(
-            session, room, snapshot, call_log, parse.decision, mode
+        pending_id, guardrail_decisions = await self._route_decision(
+            session, room, snapshot, call_log, parse.decision, mode, now
         )
 
         log.info(
@@ -524,6 +564,7 @@ class Supervisor:
             outcome=parse.outcome.value,
             mode=mode.value,
             pending_id=pending_id,
+            guardrail_decisions=len(guardrail_decisions),
         )
         return RoomTickResult(
             room_id=room.room_id,
@@ -533,6 +574,7 @@ class Supervisor:
             outcome=parse.outcome,
             mode=mode,
             pending_id=pending_id,
+            guardrail_decisions=guardrail_decisions,
         )
 
     @staticmethod
@@ -580,19 +622,33 @@ class Supervisor:
         call_log: LLMCallLog,
         decision: Any,
         mode: AdjustmentMode,
-    ) -> int | None:
+        now: dt.datetime,
+    ) -> tuple[int | None, list[GuardrailDecision]]:
         """Route a usable decision per its resolved effective mode.
 
         * ``report_only`` — write the report ``event_log`` row only.
         * ``supervised_approval`` — also park a pending approval
           (:func:`app.core.sfw.create_pending`) and, if a Telegram bot is
           wired, push it. The supervisor still applies nothing.
-        * ``bounded_auto_adjust`` — Phase-9 stub: logs the report row and
-          does not apply (the validator + auto-apply land in Phase 9).
+        * ``bounded_auto_adjust`` — run every proposed change through the
+          Phase-9 guardrail validator (:meth:`_run_bounded_auto_adjust`):
+          ``apply`` / ``apply_novel`` adds an overlay + a command batch,
+          ``reject`` writes a ``guardrail_rejection`` event and runs the
+          pattern detector, ``defer`` is logged.
+
+        Args:
+            session: Active async session.
+            room: The room's tick input.
+            snapshot: The snapshot the decision was built from.
+            call_log: The :class:`LLMCallLog` row for the decision.
+            decision: The validated LLM decision.
+            mode: The resolved effective mode.
+            now: The tick time.
 
         Returns:
-            The created pending-approval id when the SFW path fired,
-            else ``None``.
+            ``(pending_id, guardrail_decisions)`` — ``pending_id`` is set
+            only on the SFW path; ``guardrail_decisions`` is non-empty
+            only on the bounded-auto-adjust path.
         """
         # Every routed decision still gets its report event_log row — the
         # dashboard / digest surface is mode-independent.
@@ -600,9 +656,15 @@ class Supervisor:
             session, room.room_id, snapshot, call_log, decision
         )
 
+        if mode is AdjustmentMode.bounded_auto_adjust:
+            decisions = await self._run_bounded_auto_adjust(
+                session, room, snapshot, call_log, decision, now
+            )
+            return None, decisions
+
         if mode is not AdjustmentMode.supervised_approval:
-            # report_only and bounded_auto_adjust (P9 stub) apply nothing.
-            return None
+            # report_only applies nothing.
+            return None, []
 
         pending = await create_pending(
             session,
@@ -613,7 +675,345 @@ class Supervisor:
             summary=f"AI proposal for {room.room_id}: {decision.human_summary}",
         )
         await self._notify_telegram(pending)
-        return pending.id
+        return pending.id, []
+
+    async def _run_bounded_auto_adjust(
+        self,
+        session: AsyncSession,
+        room: RoomTickInput,
+        snapshot: SensorSnapshot,
+        call_log: LLMCallLog,
+        decision: Any,
+        now: dt.datetime,
+    ) -> list[GuardrailDecision]:
+        """Run the Phase-9 guardrail validator over a bounded-mode proposal.
+
+        For each non-zero proposed change in the decision, calls
+        :func:`app.core.guardrails.validate_all`. The verdict drives the
+        side effects:
+
+        * ``apply`` / ``apply_novel`` — :func:`app.core.overlays.add_adjustment`
+          adds a runtime overlay (source ``ai_auto``), then the resulting
+          effective target is written to HA via one idempotent
+          :func:`app.core.command_queue.enqueue_batch`. A
+          ``controlled_adjustment`` audit row is written (with the
+          ``novel_proposal`` flag when applicable).
+        * ``reject`` — a ``guardrail_rejection`` ``event_log`` row +
+          audit row are written, then
+          :func:`app.core.guardrails.detect_rejection_pattern` runs (a
+          run of >= 3 same-``AP`` rejections in 1h escalates to a
+          ``formal_deviation``).
+        * ``defer`` — an ``info_event`` is logged; nothing applied.
+
+        Args:
+            session: Active async session.
+            room: The room's tick input.
+            snapshot: The snapshot the decision was built from.
+            call_log: The :class:`LLMCallLog` row for the decision.
+            decision: The validated LLM decision.
+            now: The tick time (cool-down / window arithmetic).
+
+        Returns:
+            One :class:`GuardrailDecision` per proposed change processed.
+        """
+        # The bounded path attributes overlays to the supervisor system
+        # user; ensure that user row exists (runtime_adjustment.created_by
+        # is a FK) before any overlay is added.
+        await self._ensure_system_user(session)
+
+        action_set = build_action_set(
+            snapshot, candidates=room.action_candidates or None
+        )
+        day_index = snapshot.cycle_day
+        decisions: list[GuardrailDecision] = []
+        applied: list[GuardrailDecision] = []
+
+        for change in decision.proposed_changes:
+            if change.direction == "no_change" or change.delta == 0.0:
+                continue
+            verdict = await validate_all(
+                session,
+                change=change,
+                snapshot=snapshot,
+                room_config=room.room_config,
+                allowed_action_set=action_set,
+                room_id=room.room_id,
+                now=now,
+            )
+            decisions.append(verdict)
+
+            if verdict.applied:
+                await self._apply_guardrail_change(
+                    session, room, snapshot, change, verdict, day_index
+                )
+                applied.append(verdict)
+            elif verdict.rejected:
+                await self._record_guardrail_rejection(
+                    session, room.room_id, snapshot, call_log, verdict
+                )
+            else:  # deferred
+                await self._record_guardrail_defer(
+                    session, room.room_id, snapshot, verdict
+                )
+
+        # Apply all overlays first, then write one command batch for the
+        # resulting effective targets — the batch is idempotent on the
+        # snapshot id so a duplicate tick cannot re-fire it.
+        if applied:
+            await self._enqueue_guardrail_batch(
+                session, room, snapshot, applied, day_index
+            )
+
+        log.info(
+            "supervisor_bounded_auto_adjust",
+            room_id=room.room_id,
+            snapshot_id=snapshot.id,
+            applied=len(applied),
+            rejected=sum(1 for d in decisions if d.rejected),
+            deferred=sum(1 for d in decisions if d.deferred),
+        )
+        return decisions
+
+    @staticmethod
+    async def _ensure_system_user(session: AsyncSession) -> None:
+        """Lazily create the supervisor system user.
+
+        A bounded-auto-adjust overlay has no human creator, so it is
+        attributed to the :data:`_ACTOR` system user. ``runtime_adjustment.created_by``
+        is a foreign key to ``users.id``, so that user row must exist.
+        It is created on first use (no migration needed — same lazy
+        posture as :func:`app.core.room_runtime.get_or_create`).
+        """
+        if await session.get(User, _ACTOR) is not None:
+            return
+        session.add(
+            User(
+                id=_ACTOR,
+                display_name=_SYSTEM_USER_DISPLAY_NAME,
+                active=True,
+            )
+        )
+        await session.flush()
+        log.info("supervisor_system_user_created", user_id=_ACTOR)
+
+    async def _apply_guardrail_change(
+        self,
+        session: AsyncSession,
+        room: RoomTickInput,
+        snapshot: SensorSnapshot,
+        change: Any,
+        verdict: GuardrailDecision,
+        day_index: int,
+    ) -> None:
+        """Apply one guardrail-approved change as a runtime overlay.
+
+        Adds a ``bounded_auto_adjust`` runtime overlay (source
+        ``ai_auto``); the command-queue write for the resulting effective
+        target is enqueued separately, once, by
+        :meth:`_enqueue_guardrail_batch`.
+        """
+        expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(hours=12)
+        await add_adjustment(
+            session,
+            room_id=room.room_id,
+            day_index=day_index,
+            param_name=change.param_name,
+            delta=verdict.applied_delta,
+            source=AdjustmentSource.ai_auto,
+            mode=AdjustmentMode.bounded_auto_adjust,
+            expires_at=expires_at,
+            created_by=_ACTOR,
+            snapshot_id=snapshot.id,
+            novel_proposal=verdict.novel_proposal,
+            reason_codes=list(verdict.reason_codes),
+        )
+        # controlled_adjustment audit row for the bounded apply — NOT a
+        # deviation (plan event taxonomy: controlled_adjustment).
+        await log_audit(
+            session,
+            event_type=AuditEventType.controlled_adjustment,
+            actor_id=_ACTOR,
+            room_id=room.room_id,
+            summary=(
+                f"Bounded auto-adjust applied {change.param_name} "
+                f"{verdict.applied_delta:+g} for {room.room_id}"
+                + (" (novel proposal)" if verdict.novel_proposal else "")
+            ),
+            params={
+                "param_name": change.param_name,
+                "delta": verdict.applied_delta,
+                "mode": AdjustmentMode.bounded_auto_adjust.value,
+                "novel_proposal": verdict.novel_proposal,
+                "outcome": verdict.outcome,
+            },
+            reason_codes=list(verdict.reason_codes),
+            snapshot_id=snapshot.id,
+        )
+        session.add(
+            EventLogEntry(
+                event_type=AuditEventType.controlled_adjustment,
+                severity=EventSeverity.info,
+                room_id=room.room_id,
+                summary=(
+                    f"Bounded auto-adjust: {change.param_name} "
+                    f"{verdict.applied_delta:+g}"
+                    + (" (novel)" if verdict.novel_proposal else "")
+                ),
+                payload={
+                    "mode": AdjustmentMode.bounded_auto_adjust.value,
+                    "snapshot_id": snapshot.id,
+                    "param_name": change.param_name,
+                    "delta": verdict.applied_delta,
+                    "novel_proposal": verdict.novel_proposal,
+                },
+                reason_codes=list(verdict.reason_codes),
+            )
+        )
+        await session.flush()
+
+    async def _enqueue_guardrail_batch(
+        self,
+        session: AsyncSession,
+        room: RoomTickInput,
+        snapshot: SensorSnapshot,
+        applied: list[GuardrailDecision],
+        day_index: int,
+    ) -> None:
+        """Enqueue one command batch for every guardrail-applied change.
+
+        The overlays are already in place (and the effective-target
+        matview refreshed by :func:`app.core.overlays.add_adjustment`);
+        this reads each resulting effective target and enqueues an
+        idempotent batch keyed on the snapshot id.
+        """
+        commands: list[dict[str, Any]] = []
+        for verdict in applied:
+            value = await effective_target(
+                session, room.room_id, day_index, verdict.param_name
+            )
+            if value is None:
+                log.warning(
+                    "bounded_auto_adjust_no_effective_target",
+                    room_id=room.room_id,
+                    param_name=verdict.param_name,
+                )
+                continue
+            entity = (
+                f"input_number.{room.room_id}_setpoint_{verdict.param_name}"
+            )
+            commands.append(
+                {
+                    "domain": "input_number",
+                    "service": "set_value",
+                    "target_entity": entity,
+                    "service_data": {"entity_id": entity, "value": value},
+                    "expected_value": f"{value}",
+                    "reason": (
+                        f"bounded auto-adjust ({verdict.param_name})"
+                    ),
+                }
+            )
+        if commands:
+            await enqueue_batch(
+                session,
+                room_id=room.room_id,
+                purpose="bounded_auto_adjust",
+                idempotency_key=f"bounded-auto-adjust:{snapshot.id}",
+                commands=commands,
+                enqueued_by=_ACTOR,
+            )
+
+    async def _record_guardrail_rejection(
+        self,
+        session: AsyncSession,
+        room_id: str,
+        snapshot: SensorSnapshot,
+        call_log: LLMCallLog,
+        verdict: GuardrailDecision,
+    ) -> None:
+        """Write a ``guardrail_rejection`` for a rejected bounded change.
+
+        Writes the audit row first (so the pattern detector counts it),
+        an ``event_log`` row for the dashboard, then runs
+        :func:`app.core.guardrails.detect_rejection_pattern` for every
+        ``AP-*`` id the rejection cited — a run of three same-``AP``
+        rejections in an hour escalates to a ``formal_deviation``.
+        """
+        await log_audit(
+            session,
+            event_type=AuditEventType.guardrail_rejection,
+            actor_id=_ACTOR,
+            room_id=room_id,
+            summary=(
+                f"Bounded auto-adjust rejected {verdict.param_name} "
+                f"for {room_id}: {verdict.detail}"
+            ),
+            params={
+                "param_name": verdict.param_name,
+                "outcome": verdict.outcome,
+                "detail": verdict.detail,
+            },
+            reason_codes=list(verdict.reason_codes),
+            snapshot_id=snapshot.id,
+            llm_call_id=call_log.id,
+        )
+        session.add(
+            EventLogEntry(
+                event_type=AuditEventType.guardrail_rejection,
+                severity=EventSeverity.warning,
+                room_id=room_id,
+                summary=(
+                    f"Guardrail rejection: {verdict.param_name} — "
+                    f"{verdict.detail[:400]}"
+                ),
+                payload={
+                    "mode": AdjustmentMode.bounded_auto_adjust.value,
+                    "snapshot_id": snapshot.id,
+                    "param_name": verdict.param_name,
+                    "outcome": verdict.outcome,
+                },
+                reason_codes=list(verdict.reason_codes),
+            )
+        )
+        await session.flush()
+
+        # Pattern detection: a run of same-AP rejections is escalated.
+        for code in verdict.reason_codes:
+            if code.startswith("AP-"):
+                await detect_rejection_pattern(session, room_id, code)
+
+    async def _record_guardrail_defer(
+        self,
+        session: AsyncSession,
+        room_id: str,
+        snapshot: SensorSnapshot,
+        verdict: GuardrailDecision,
+    ) -> None:
+        """Write an ``info_event`` for a deferred bounded change.
+
+        A deferral (cool-down active, or a no-touch window) is neither an
+        apply nor a rejection — it is logged info-severity and nothing
+        is applied.
+        """
+        session.add(
+            EventLogEntry(
+                event_type=AuditEventType.info_event,
+                severity=EventSeverity.info,
+                room_id=room_id,
+                summary=(
+                    f"Bounded auto-adjust deferred {verdict.param_name} "
+                    f"for {room_id}: {verdict.detail[:400]}"
+                ),
+                payload={
+                    "mode": AdjustmentMode.bounded_auto_adjust.value,
+                    "snapshot_id": snapshot.id,
+                    "param_name": verdict.param_name,
+                    "outcome": verdict.outcome,
+                },
+                reason_codes=list(verdict.reason_codes),
+            )
+        )
+        await session.flush()
 
     @staticmethod
     def _proposal_payload(decision: Any, snapshot: SensorSnapshot) -> dict[str, Any]:
