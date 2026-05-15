@@ -10,7 +10,7 @@ be worse than a hard failure.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from contextlib import asynccontextmanager
 
 from sqlalchemy import MetaData, text
 from sqlalchemy.ext.asyncio import (
@@ -22,10 +22,6 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
-
-if TYPE_CHECKING:
-    pass
-
 
 # Stable constraint/index names so Alembic autogenerate produces clean diffs
 NAMING_CONVENTION = {
@@ -71,17 +67,40 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+async def apply_hmac_gucs(session: AsyncSession) -> None:
+    """Set ``audit.hmac_key_<id>`` session GUCs the audit trigger reads.
+
+    Without these the BEFORE INSERT trigger on ``audit_event`` raises, so
+    any code path that may write audit rows must run on a session that
+    has had this applied. ``open_session`` / ``get_session`` do it
+    automatically.
+    """
+    settings = get_settings()
+    for key_id, key_hex in settings.hmac_keys.items():
+        # key_id is forced to int — never user-controlled in SQL
+        await session.execute(
+            text(f"SELECT set_config('audit.hmac_key_{int(key_id)}', :v, false)"),
+            {"v": key_hex},
+        )
+
+
+@asynccontextmanager
+async def open_session() -> AsyncIterator[AsyncSession]:
+    """Open an ``AsyncSession`` with HMAC GUCs set — for workers + scripts.
+
+    This is the session factory handed to workers (``Executor``,
+    ``SealWorker``) and CLIs. It is NOT a FastAPI dependency — use
+    :func:`get_session` for request handlers.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        await apply_hmac_gucs(session)
+        yield session
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency. Sets HMAC key GUCs before yielding."""
-    factory = get_session_factory()
-    settings = get_settings()
-    async with factory() as session:
-        for key_id, key_hex in settings.hmac_keys.items():
-            # key_id is forced to int — never user-controlled in SQL
-            await session.execute(
-                text(f"SELECT set_config('audit.hmac_key_{int(key_id)}', :v, false)"),
-                {"v": key_hex},
-            )
+    async with open_session() as session:
         try:
             yield session
         except Exception:

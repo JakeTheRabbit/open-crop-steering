@@ -1,9 +1,4 @@
-"""FastAPI application entrypoint.
-
-The full router tree lands in later phases (P5 onwards). Phase 1 only
-exposes ``/healthz`` and ``/readyz`` so we can prove the container boots
-and reaches its database.
-"""
+"""FastAPI application entrypoint."""
 
 from __future__ import annotations
 
@@ -13,7 +8,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
-from app.api import health
+from app.api import admin, audit, health
 from app.config import get_settings
 from app.db import dispose_engine, get_engine
 from app.logging_config import configure_logging
@@ -50,3 +45,5 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(health.router)
+app.include_router(audit.router)
+app.include_router(admin.router)
