@@ -1,0 +1,45 @@
+{
+  "name": "open-crop-steering-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open Crop Steering planner UI (Next.js static export, served by FastAPI under HA Ingress)",
+  "license": "MIT",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "echo 'Static export served by FastAPI; no separate start' && exit 0",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@tanstack/react-query": "^5.59.0",
+    "tailwindcss": "^3.4.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "tailwind-merge": "^2.5.0",
+    "lucide-react": "^0.456.0",
+    "zod": "^3.23.0",
+    "date-fns": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "typescript": "^5.6",
+    "eslint": "^9",
+    "eslint-config-next": "^15",
+    "@vitejs/plugin-react": "^4.3.0",
+    "vitest": "^2.1.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.6.0",
+    "jsdom": "^25.0.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47"
+  }
+}

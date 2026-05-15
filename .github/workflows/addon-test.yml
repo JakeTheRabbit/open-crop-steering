@@ -1,0 +1,32 @@
+name: addon-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  hassio-addons-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate add-on config.yaml structure
+        # Lightweight validation; the official HA add-on framework runs heavier checks
+        # in builder repos. Once add-on builder image is wired in P11 we'll boot the
+        # container in a Supervisor-emulated env and hit /api/status/health.
+        run: |
+          if [ ! -f open_crop_steering/config.yaml ]; then
+            echo "open_crop_steering/config.yaml missing — Phase 11 not yet landed"
+            exit 0
+          fi
+          python -c "
+          import yaml, sys
+          with open('open_crop_steering/config.yaml') as f:
+              cfg = yaml.safe_load(f)
+          required = ['slug', 'name', 'version', 'arch', 'startup', 'options', 'schema']
+          missing = [k for k in required if k not in cfg]
+          if missing:
+              print(f'Missing required keys: {missing}')
+              sys.exit(1)
+          print('config.yaml structure ok')
+          "

@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a new feature or enhancement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Backend (FastAPI / workers / DB)
+        - Frontend (Next.js UI)
+        - Add-on packaging
+        - AI supervisor / guardrails
+        - Audit / compliance
+        - Docs
+        - CI / tooling
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: param-class-impact
+    attributes:
+      label: Does this change AI write scope (Class A-E)?
+      options:
+        - label: Yes — this affects param risk classes (will need plan amendment + QAP review)
+        - label: No

@@ -1,0 +1,5 @@
+# Home Assistant add-on repository metadata
+# Users add this repo URL via Settings → Add-ons → Add-on Store → ⋮ → Repositories
+name: Open Crop Steering
+url: https://github.com/JakeTheRabbit/open-crop-steering
+maintainer: JakeTheRabbit <123831499+JakeTheRabbit@users.noreply.github.com>

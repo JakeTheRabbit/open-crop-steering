@@ -1,0 +1,64 @@
+name: Bug report
+description: Something is broken or behaving wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Do NOT include**: secrets, real recipe values, audit log fragments with actor IDs, or anything from your facility's private repo. Sanitize before pasting.
+
+  - type: input
+    id: version
+    attributes:
+      label: Open Crop Steering version
+      placeholder: "0.1.0 (or main@<sha>)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-mode
+    attributes:
+      label: Install mode
+      options:
+        - HA add-on
+        - Standalone Docker
+    validations:
+      required: true
+
+  - type: input
+    id: ha-version
+    attributes:
+      label: Home Assistant version (if add-on mode)
+      placeholder: "2024.x.x"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Concrete description, not "it's broken"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (sanitized)
+      render: shell

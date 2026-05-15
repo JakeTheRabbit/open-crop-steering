@@ -1,0 +1,114 @@
+[project]
+name = "open-crop-steering-backend"
+version = "0.1.0"
+description = "AI-supervised cannabis cultivation control plane (HA add-on backend)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [
+  { name = "JakeTheRabbit", email = "123831499+JakeTheRabbit@users.noreply.github.com" }
+]
+dependencies = [
+  "fastapi[standard]>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+  "asyncpg>=0.30",
+  "psycopg[binary]>=3.2",
+  "httpx>=0.28",
+  "websockets>=13",
+  "influxdb-client>=1.46",
+  "python-telegram-bot>=21",
+  "python-dotenv>=1.0",
+  "aiofiles>=24",
+  "python-jose[cryptography]>=3.3",
+  "passlib[bcrypt]>=1.7",
+  "cryptography>=43",
+  "structlog>=24",
+  "tenacity>=9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.7",
+  "mypy>=1.13",
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6",
+  "pytest-homeassistant-custom-component>=0.13",
+  "testcontainers[postgres,influxdb]>=4.8",
+  "freezegun>=1.5",
+  "respx>=0.21",
+]
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+# ---------- ruff ----------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "build", "dist", "node_modules", "alembic/versions"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "B", "UP", "N", "S", "C4", "SIM", "ARG", "PL", "RUF",
+  "ASYNC", "DTZ", "ERA", "PIE", "PT", "RET", "TID", "TRY"
+]
+ignore = [
+  "E501",   # line length handled by formatter
+  "S101",   # assert in tests is fine
+  "PLR0913", # function-arg count
+  "TRY003", # long error messages allowed
+]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/tests/**" = ["S101", "S106", "PLR2004", "ARG"]
+"backend/alembic/**" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------- mypy ----------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+exclude = ["alembic/versions"]
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*", "telegram.*", "influxdb_client.*"]
+ignore_missing_imports = true
+
+# ---------- pytest ----------
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --strict-markers --cov=backend/app --cov-report=term-missing"
+testpaths = ["backend/tests"]
+asyncio_mode = "auto"
+markers = [
+  "unit: unit tests (no external services)",
+  "integration: integration tests (Postgres + InfluxDB via testcontainers)",
+  "slow: tests that take >5s",
+]
+
+# ---------- coverage ----------
+[tool.coverage.run]
+source = ["backend/app"]
+omit = ["backend/tests/*", "backend/alembic/*"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+]

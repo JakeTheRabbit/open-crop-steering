@@ -1,0 +1,50 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version in add-on config + manifest
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          if [ -f open_crop_steering/config.yaml ]; then
+            sed -i "s/^version: .*/version: \"$VERSION\"/" open_crop_steering/config.yaml
+          fi
+          if [ -f frontend/package.json ]; then
+            python -c "
+          import json, pathlib
+          p = pathlib.Path('frontend/package.json')
+          j = json.loads(p.read_text())
+          j['version'] = '$VERSION'
+          p.write_text(json.dumps(j, indent=2))
+          "
+          fi
+
+      - name: Generate release notes from CHANGELOG
+        run: |
+          python -c "
+          import re, pathlib
+          changelog = pathlib.Path('CHANGELOG.md').read_text()
+          # Pull the section for this version
+          version = '${GITHUB_REF#refs/tags/v}'
+          pattern = rf'## \[{re.escape(version)}\].*?(?=^## \[|\Z)'
+          match = re.search(pattern, changelog, re.MULTILINE | re.DOTALL)
+          notes = match.group(0).strip() if match else 'See CHANGELOG.md'
+          pathlib.Path('release_notes.md').write_text(notes)
+          "
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          generate_release_notes: false
