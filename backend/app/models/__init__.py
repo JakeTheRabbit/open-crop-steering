@@ -23,6 +23,7 @@ from app.models.recipe_revision import (
     RecipeRevisionParam,
     RecipeStatus,
 )
+from app.models.room_runtime import RoomRuntime
 from app.models.runtime_adjustment import (
     AdjustmentMode,
     AdjustmentSource,
@@ -54,6 +55,7 @@ __all__ = [
     "RecipeStatus",
     "Role",
     "RoleName",
+    "RoomRuntime",
     "RuntimeAdjustment",
     "SensorSnapshot",
     "TelegramUserMap",

@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "cumulative_delta",
     "sensor_snapshot",
     "llm_call_log",
+    "room_runtime",  # added by migration 0002
     "alembic_version",  # added by alembic itself
 }
 
@@ -131,3 +132,90 @@ async def test_audit_event_pk_index_unique(session: AsyncSession) -> None:
     )
     indexes = {row[0] for row in result.all()}
     assert "effective_target_pk_idx" in indexes
+
+
+async def test_room_runtime_table_present_after_upgrade(
+    session: AsyncSession,
+) -> None:
+    """Migration 0002 creates ``room_runtime`` with its expected columns."""
+    result = await session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'room_runtime'"
+        )
+    )
+    columns = {row[0] for row in result.all()}
+    assert columns == {
+        "room_id",
+        "rollout_stage",
+        "cycle_start_date",
+        "current_state",
+        "muted",
+        "last_tick_at",
+        "paused",
+    }
+
+
+def _alembic_config() -> object:
+    """Build an Alembic config pointed at this repo's migration tree."""
+    from pathlib import Path  # noqa: PLC0415
+
+    from alembic.config import Config as AlembicConfig  # noqa: PLC0415
+
+    backend_dir = Path(__file__).resolve().parent.parent.parent
+    cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+    return cfg
+
+
+def _room_runtime_exists_sync(database_url: str) -> bool:
+    """Synchronously check whether ``room_runtime`` exists.
+
+    Uses a sync ``psycopg`` connection — this runs from a *sync* test so
+    it cannot share the async-test event loop, and Alembic's own
+    ``env.py`` spins the migration loop itself.
+    """
+    from sqlalchemy import create_engine  # noqa: PLC0415
+
+    sync_url = database_url.replace("+asyncpg", "+psycopg")
+    engine = create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = 'room_runtime'"
+                )
+            )
+            return result.scalar() == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_room_runtime_migration_downgrade(database_url: str) -> None:
+    """``alembic downgrade`` to the baseline drops ``room_runtime`` cleanly.
+
+    A *synchronous* test: Alembic's ``env.py`` runs migrations through
+    its own ``asyncio.run`` — that cannot be nested inside the
+    pytest-asyncio loop an ``async def`` test runs in. So this test runs
+    sync. It downgrades to ``0001_baseline`` (exercising migration
+    0002's ``downgrade()``) then upgrades back to ``head`` — the net
+    schema effect is zero, leaving the session-shared schema intact for
+    sibling tests.
+    """
+    from alembic import command  # noqa: PLC0415
+
+    cfg = _alembic_config()
+    try:
+        command.downgrade(cfg, "0001_baseline")
+        assert not _room_runtime_exists_sync(
+            database_url
+        ), "room_runtime should be dropped by downgrade"
+    finally:
+        # Always restore to head so sibling tests see the full schema.
+        command.upgrade(cfg, "head")
+
+    assert _room_runtime_exists_sync(
+        database_url
+    ), "room_runtime should be restored by upgrade"
