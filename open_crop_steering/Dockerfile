@@ -17,6 +17,14 @@
 # stages only READ frontend/ — they never write it (another agent owns it).
 # =============================================================================
 
+# BUILD_FROM is substituted by the HA Supervisor from build.yaml's
+# build_from map (the HA amd64 python base — s6-overlay v3 + bashio
+# already on board). The default lets a plain `docker build` (standalone
+# CI) work too. It MUST be declared here, before the first FROM, so it is
+# a global ARG visible to stage 3's `FROM ${BUILD_FROM}` — an ARG scoped
+# inside an earlier stage is not.
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-python:3.12-alpine3.21
+
 # -----------------------------------------------------------------------------
 # Stage 1 — frontend: build the Next.js static export.
 #
@@ -55,12 +63,8 @@ RUN python -m pip install --upgrade pip wheel build \
 # -----------------------------------------------------------------------------
 # Stage 3 — final: HA base image + Postgres 16 + s6 services.
 #
-# BUILD_FROM is substituted by the HA Supervisor from build.yaml's
-# build_from map (the HA amd64 python base — s6-overlay v3 + bashio
-# already on board). A plain default is given so a bare `docker build`
-# (standalone CI) still works.
+# Uses the global BUILD_FROM ARG declared at the top of this file.
 # -----------------------------------------------------------------------------
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-python:3.12-alpine3.21
 FROM ${BUILD_FROM}
 
 # Bundled PostgreSQL 16 server (plan stack: "bundled Postgres 16"), the
@@ -85,6 +89,13 @@ RUN python -m pip install --no-cache-dir --no-index --find-links=/tmp/wheels \
 # reads OCS_FRONTEND_DIR). Baked in so the add-on is self-contained.
 COPY --from=frontend /build/frontend/out /opt/frontend
 ENV OCS_FRONTEND_DIR=/opt/frontend
+
+# Alembic migrations + config are NOT part of the installed wheel (the
+# wheel only ships the `app` package). Copy them to a fixed path the
+# `migrate` CLI subcommand resolves via OCS_ALEMBIC_DIR.
+COPY backend/alembic.ini /opt/ocs-migrations/alembic.ini
+COPY backend/alembic /opt/ocs-migrations/alembic
+ENV OCS_ALEMBIC_DIR=/opt/ocs-migrations
 
 # s6 service definitions + the cont-init.d startup script. rootfs/ mirrors
 # the container filesystem: rootfs/etc/services.d/<name>/{run,finish} and

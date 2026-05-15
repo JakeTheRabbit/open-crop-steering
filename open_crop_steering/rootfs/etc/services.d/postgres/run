@@ -23,6 +23,13 @@ command -v "${PGBIN}/postgres" >/dev/null 2>&1 || PGBIN=/usr/bin
 
 bashio::log.info "postgres: data directory ${PGDATA}"
 
+# --- runtime socket/lock directory -----------------------------------------
+# /run is a tmpfs wiped on every container start, so PostgreSQL's socket +
+# lock directory must be (re)created each boot or `pg_ctl start` fails with
+# "could not create lock file /run/postgresql/.s.PGSQL.5432.lock".
+mkdir -p /run/postgresql
+chown postgres:postgres /run/postgresql
+
 # --- one-time cluster init -------------------------------------------------
 if [ ! -s "${PGDATA}/PG_VERSION" ]; then
   bashio::log.info "postgres: initialising a new cluster (first boot)."
@@ -35,10 +42,15 @@ if [ ! -s "${PGDATA}/PG_VERSION" ]; then
     --auth-local=trust \
     --auth-host=trust
 
-  # Start a temporary local server to create the app role + database.
+  # Start a temporary server to create the app role + database. It
+  # listens on the UNIX SOCKET ONLY (listen_addresses='') — never on
+  # TCP — so the api/worker readiness probes (pg_isready -h 127.0.0.1)
+  # cannot latch onto this short-lived init server and race ahead of
+  # the database actually existing. The real server below is the only
+  # thing that ever opens 127.0.0.1:5432.
   su-exec postgres "${PGBIN}/pg_ctl" \
     --pgdata="${PGDATA}" \
-    --options="-c listen_addresses='127.0.0.1'" \
+    --options="-c listen_addresses=''" \
     --wait start
   su-exec postgres psql --username=postgres --dbname=postgres \
     --command="CREATE ROLE ocs WITH LOGIN SUPERUSER PASSWORD 'ocs';"

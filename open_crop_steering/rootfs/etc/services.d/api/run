@@ -24,11 +24,16 @@ source /run/ocs.env
 MIGRATED_MARKER=/run/ocs-migrated
 
 # --- wait for the bundled Postgres -----------------------------------------
-bashio::log.info "api: waiting for PostgreSQL to accept connections..."
-until pg_isready -h 127.0.0.1 -p 5432 -U ocs >/dev/null 2>&1; do
+# Probe with a real SELECT against the target database, not just
+# pg_isready: pg_isready reports "up" for any responding server even if
+# the database is missing. We must not run migrations until the
+# open_crop_steering database genuinely exists + accepts our connection.
+bashio::log.info "api: waiting for the open_crop_steering database..."
+until psql -h 127.0.0.1 -p 5432 -U ocs -d open_crop_steering \
+        -tAc 'SELECT 1' >/dev/null 2>&1; do
   sleep 1
 done
-bashio::log.info "api: PostgreSQL is ready."
+bashio::log.info "api: database is ready."
 
 # --- run migrations once per boot ------------------------------------------
 bashio::log.info "api: running database migrations (alembic upgrade head)."

@@ -74,16 +74,27 @@ def _build_supervisor() -> tuple[object, Callable[[object], Awaitable[None]]]:
     """Build the :class:`~app.workers.supervisor.Supervisor` + run coroutine.
 
     The supervisor needs the GUC-setting session factory plus an Influx,
-    HA and LLM client. ``rooms_provider`` returns an empty list here:
-    room configuration is operator-supplied at runtime (Phase 11 wizard /
+    HA and LLM client. ``no_touch_windows`` is built from
+    ``settings.no_touch_windows`` — each mapping is parsed (and validated)
+    by :meth:`~app.core.no_touch.NoTouchWindow.from_mapping` here, at
+    worker start, so a bad window fails loudly rather than silently at
+    tick time. ``rooms_provider`` returns an empty list here: room
+    configuration is operator-supplied at runtime (Phase 11 wizard /
     Phase 14 deploy) and is not known at process start, so v0.1 ticks
     over an empty room set until the room store is wired. The tick loop
     is otherwise fully live.
     """
+    from app.core.no_touch import NoTouchWindow  # noqa: PLC0415
     from app.ha_client import HAClient  # noqa: PLC0415
     from app.influx_client import InfluxClient  # noqa: PLC0415
     from app.llm_client import LLMClient  # noqa: PLC0415
     from app.workers.supervisor import RoomTickInput, Supervisor  # noqa: PLC0415
+
+    settings = get_settings()
+    no_touch_windows = [
+        NoTouchWindow.from_mapping(window)
+        for window in settings.no_touch_windows
+    ]
 
     def _rooms_provider() -> list[RoomTickInput]:
         # No persisted room store yet — the supervisor ticks an empty
@@ -96,11 +107,12 @@ def _build_supervisor() -> tuple[object, Callable[[object], Awaitable[None]]]:
         ha=HAClient(),
         llm=LLMClient(),
         rooms_provider=_rooms_provider,
+        no_touch_windows=no_touch_windows,
     )
 
     async def _run(w: object) -> None:
         assert isinstance(w, Supervisor)
-        await w.run_forever()
+        await w.run_forever(interval=float(settings.supervisor_tick_seconds))
 
     return worker, _run
 
@@ -265,19 +277,35 @@ def _cmd_worker(args: argparse.Namespace) -> int:
 def _cmd_migrate(_args: argparse.Namespace) -> int:
     """Run ``alembic upgrade head`` — invoked by the ``api`` service first.
 
-    The Alembic config lives at ``backend/alembic.ini`` with its script
-    directory at ``backend/alembic``; the runtime ``sqlalchemy.url`` is
-    taken from ``settings.database_url`` (the ini's placeholder URL is
-    overridden here so no env-interpolation in the ini is needed).
+    The Alembic config (``alembic.ini`` + the ``alembic`` script
+    directory) is NOT part of the installed wheel, so its location is
+    resolved in two ways:
+
+    * ``OCS_ALEMBIC_DIR`` — set by the Docker image, which copies
+      ``alembic.ini`` + ``alembic/`` to a fixed path (the wheel in
+      ``site-packages`` has no sibling ``alembic.ini``).
+    * otherwise the dev layout — ``backend/`` next to the ``app``
+      package (editable install).
+
+    The runtime ``sqlalchemy.url`` is taken from
+    ``settings.database_url`` (the ini's placeholder URL is overridden
+    here so no env-interpolation in the ini is needed).
     """
+    import os  # noqa: PLC0415
+
     from alembic import command  # noqa: PLC0415
     from alembic.config import Config as AlembicConfig  # noqa: PLC0415
 
-    backend_dir = Path(__file__).resolve().parent.parent
-    cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
-    cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+    alembic_dir_env = os.getenv("OCS_ALEMBIC_DIR")
+    base = (
+        Path(alembic_dir_env)
+        if alembic_dir_env
+        else Path(__file__).resolve().parent.parent
+    )
+    cfg = AlembicConfig(str(base / "alembic.ini"))
+    cfg.set_main_option("script_location", str(base / "alembic"))
     cfg.set_main_option("sqlalchemy.url", get_settings().database_url)
-    log.info("cli_migrate_start")
+    log.info("cli_migrate_start", alembic_dir=str(base))
     command.upgrade(cfg, "head")
     log.info("cli_migrate_complete")
     return 0
