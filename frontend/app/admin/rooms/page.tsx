@@ -43,6 +43,9 @@ function defaultEquipmentMap(
   roomId: string,
   existing?: Partial<RoomEquipmentMap>,
 ): RoomEquipmentMap {
+  /** Copy a list-valued field, or default to an empty list. */
+  const list = (v: readonly string[] | undefined): string[] =>
+    v ? [...v] : [];
   return {
     room_id: roomId,
     env_control_enabled: existing?.env_control_enabled ?? false,
@@ -50,28 +53,26 @@ function defaultEquipmentMap(
     irrigation_control_enabled: existing?.irrigation_control_enabled ?? false,
     tank_control_enabled: existing?.tank_control_enabled ?? false,
     co2_control_enabled: existing?.co2_control_enabled ?? false,
-    temp_sensor: existing?.temp_sensor ?? null,
-    leaf_temp_sensor: existing?.leaf_temp_sensor ?? null,
-    rh_sensor: existing?.rh_sensor ?? null,
-    co2_sensor: existing?.co2_sensor ?? null,
-    under_canopy_rh_probe: existing?.under_canopy_rh_probe ?? null,
+    temp_sensors: list(existing?.temp_sensors),
+    rh_sensors: list(existing?.rh_sensors),
+    co2_sensors: list(existing?.co2_sensors),
+    leaf_temp_sensors: list(existing?.leaf_temp_sensors),
+    under_canopy_rh_probes: list(existing?.under_canopy_rh_probes),
+    vwc_sensors: list(existing?.vwc_sensors),
+    ec_sensors: list(existing?.ec_sensors),
+    ppfd_sensors: list(existing?.ppfd_sensors),
+    dli_sensors: list(existing?.dli_sensors),
+    pm1_sensors: list(existing?.pm1_sensors),
+    pm25_sensors: list(existing?.pm25_sensors),
+    pm4_sensors: list(existing?.pm4_sensors),
+    pm10_sensors: list(existing?.pm10_sensors),
     cooling_capacity_entity: existing?.cooling_capacity_entity ?? null,
-    light_entities: existing?.light_entities
-      ? [...existing.light_entities]
-      : [],
-    ac_entities: existing?.ac_entities ? [...existing.ac_entities] : [],
-    dehumidifier_entities: existing?.dehumidifier_entities
-      ? [...existing.dehumidifier_entities]
-      : [],
-    reheat_entities: existing?.reheat_entities
-      ? [...existing.reheat_entities]
-      : [],
-    exhaust_entities: existing?.exhaust_entities
-      ? [...existing.exhaust_entities]
-      : [],
-    co2_solenoid_entities: existing?.co2_solenoid_entities
-      ? [...existing.co2_solenoid_entities]
-      : [],
+    light_entities: list(existing?.light_entities),
+    ac_entities: list(existing?.ac_entities),
+    dehumidifier_entities: list(existing?.dehumidifier_entities),
+    reheat_entities: list(existing?.reheat_entities),
+    exhaust_entities: list(existing?.exhaust_entities),
+    co2_solenoid_entities: list(existing?.co2_solenoid_entities),
     zones: existing?.zones ? existing.zones.map((z) => ({ ...z })) : [],
     tanks: existing?.tanks
       ? existing.tanks.map((t) => ({

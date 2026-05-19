@@ -43,11 +43,11 @@ def _fully_equipped_env_room() -> dict:
         "env_control_enabled": True,
         "ppfd_control_enabled": True,
         "light_entities": ["light.f1_lights"],
-        "temp_sensor": "sensor.f1_temp",
-        "leaf_temp_sensor": "sensor.f1_leaf_temp",
-        "rh_sensor": "sensor.f1_rh",
-        "co2_sensor": "sensor.f1_co2",
-        "under_canopy_rh_probe": "sensor.f1_canopy_rh",
+        "temp_sensors": ["sensor.f1_temp"],
+        "leaf_temp_sensors": ["sensor.f1_leaf_temp"],
+        "rh_sensors": ["sensor.f1_rh"],
+        "co2_sensors": ["sensor.f1_co2"],
+        "under_canopy_rh_probes": ["sensor.f1_canopy_rh"],
         "cooling_capacity_entity": "climate.f1_ac",
     }
 
@@ -118,7 +118,7 @@ class TestHardRefusals:
             {
                 "room_id": "F1",
                 "env_control_enabled": True,
-                "temp_sensor": "sensor.f1_temp",
+                "temp_sensors": ["sensor.f1_temp"],
                 # leaf_temp / rh / co2 sensors absent
             }
         )
@@ -166,7 +166,7 @@ class TestFailSoftWarnings:
     async def test_missing_under_canopy_probe_is_warning(self) -> None:
         """EC-009 — no under-canopy RH probe: a fail-soft warning."""
         payload = _fully_equipped_env_room()
-        del payload["under_canopy_rh_probe"]
+        del payload["under_canopy_rh_probes"]
         resp = await _validate(payload)
         assert resp.status_code == 200
         body = resp.json()
@@ -203,3 +203,46 @@ class TestCleanConfig:
             {"room_id": "F1", "totally_unknown_field": True}
         )
         assert resp.status_code == 422
+
+
+class TestMultiSensorRoles:
+    """Sensor roles accept several entities; legacy scalar keys still load."""
+
+    async def test_multiple_sensors_per_role_accepted(self) -> None:
+        """A room can map several entities to one sensor role."""
+        payload = _fully_equipped_env_room()
+        payload["temp_sensors"] = [
+            "sensor.f1_temp_top",
+            "sensor.f1_temp_mid",
+            "sensor.f1_temp_canopy",
+        ]
+        payload["co2_sensors"] = ["sensor.f1_co2_a", "sensor.f1_co2_b"]
+        payload["vwc_sensors"] = ["sensor.f1_z1_vwc", "sensor.f1_z2_vwc"]
+        payload["pm25_sensors"] = ["sensor.f1_pm25"]
+        resp = await _validate(payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["hard_refusals"] == []
+
+    async def test_legacy_scalar_sensor_keys_accepted(self) -> None:
+        """A config saved with the pre-multi-sensor scalar keys loads.
+
+        ``RoomEquipmentMap`` folds the old ``*_sensor`` strings forward
+        into the plural list keys, so an ``equipment_map`` persisted
+        under the old schema still validates against ``extra='forbid'``
+        and the four required env sensors are seen as present.
+        """
+        resp = await _validate(
+            {
+                "room_id": "F1",
+                "env_control_enabled": True,
+                "temp_sensor": "sensor.f1_temp",
+                "leaf_temp_sensor": "sensor.f1_leaf_temp",
+                "rh_sensor": "sensor.f1_rh",
+                "co2_sensor": "sensor.f1_co2",
+            }
+        )
+        assert resp.status_code == 200
+        codes = {f["code"] for f in resp.json()["hard_refusals"]}
+        assert "env_control_missing_sensors" not in codes

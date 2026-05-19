@@ -405,12 +405,22 @@ export interface RoomEquipmentMap {
   irrigation_control_enabled: boolean;
   tank_control_enabled: boolean;
   co2_control_enabled: boolean;
-  // sensors + the headroom source — one reference entity per room
-  temp_sensor: string | null;
-  leaf_temp_sensor: string | null;
-  rh_sensor: string | null;
-  co2_sensor: string | null;
-  under_canopy_rh_probe: string | null;
+  // sensors — a room can have several of each (multiple temp probes,
+  // CO2 heads, substrate VWC/EC sensors, …), so each role is a list
+  temp_sensors: string[];
+  rh_sensors: string[];
+  co2_sensors: string[];
+  leaf_temp_sensors: string[];
+  under_canopy_rh_probes: string[];
+  vwc_sensors: string[];
+  ec_sensors: string[];
+  ppfd_sensors: string[];
+  dli_sensors: string[];
+  pm1_sensors: string[];
+  pm25_sensors: string[];
+  pm4_sensors: string[];
+  pm10_sensors: string[];
+  // the cooling-headroom source stays a single reference entity
   cooling_capacity_entity: string | null;
   // actuators — a room can have several of each (two AC units, multiple
   // grow-light circuits, …), so each role is a list of entity ids

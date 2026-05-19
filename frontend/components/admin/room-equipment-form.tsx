@@ -21,29 +21,44 @@ import {
 /**
  * The per-room equipment-map editor.
  *
- * Renders the five control-enable toggles, an {@link EntityPicker} for
- * every scalar role field, and dynamic add/remove lists for irrigation
+ * Renders the control-enable toggles, a {@link MultiEntityPicker} for
+ * every sensor and actuator role (a room has several temp probes, AC
+ * units, light circuits, …), a single {@link EntityPicker} for the
+ * cooling-headroom source, and dynamic add/remove lists for irrigation
  * zones and nutrient tanks. The component is fully controlled: the
  * parent owns the `RoomEquipmentMap` draft and an `onChange` patcher.
  */
 
-/** A single-entity role field of a {@link RoomEquipmentMap}. */
-type ScalarRoleKey =
-  | "temp_sensor"
-  | "leaf_temp_sensor"
-  | "rh_sensor"
-  | "co2_sensor"
-  | "under_canopy_rh_probe"
-  | "cooling_capacity_entity";
+/** The single-entity role field of a {@link RoomEquipmentMap}. */
+type ScalarRoleKey = "cooling_capacity_entity";
 
-/** A multi-entity (list) role field of a {@link RoomEquipmentMap}. */
-type MultiRoleKey =
+/** A multi-entity sensor role field of a {@link RoomEquipmentMap}. */
+type SensorRoleKey =
+  | "temp_sensors"
+  | "rh_sensors"
+  | "co2_sensors"
+  | "leaf_temp_sensors"
+  | "under_canopy_rh_probes"
+  | "vwc_sensors"
+  | "ec_sensors"
+  | "ppfd_sensors"
+  | "dli_sensors"
+  | "pm1_sensors"
+  | "pm25_sensors"
+  | "pm4_sensors"
+  | "pm10_sensors";
+
+/** A multi-entity actuator role field of a {@link RoomEquipmentMap}. */
+type ActuatorRoleKey =
   | "light_entities"
   | "ac_entities"
   | "dehumidifier_entities"
   | "reheat_entities"
   | "exhaust_entities"
   | "co2_solenoid_entities";
+
+/** Any multi-entity (list) role field of a {@link RoomEquipmentMap}. */
+type MultiRoleKey = SensorRoleKey | ActuatorRoleKey;
 
 /** A control-enable boolean of a {@link RoomEquipmentMap}. */
 type ToggleKey =
@@ -81,18 +96,33 @@ const TOGGLES: { key: ToggleKey; label: string; hint: string }[] = [
   },
 ];
 
-/** Single-entity role fields (sensors + the headroom source). */
-const SENSOR_FIELDS: { key: ScalarRoleKey; label: string }[] = [
-  { key: "temp_sensor", label: "Air temperature sensor" },
-  { key: "rh_sensor", label: "Relative humidity sensor" },
-  { key: "leaf_temp_sensor", label: "Leaf temperature sensor" },
-  { key: "co2_sensor", label: "CO2 sensor" },
-  { key: "under_canopy_rh_probe", label: "Under-canopy RH probe" },
-  { key: "cooling_capacity_entity", label: "Cooling-capacity source" },
+/** Environment sensor roles — multiple entities each. */
+const ENV_SENSOR_FIELDS: { key: SensorRoleKey; label: string }[] = [
+  { key: "temp_sensors", label: "Air temperature" },
+  { key: "rh_sensors", label: "Relative humidity" },
+  { key: "co2_sensors", label: "CO2" },
+  { key: "leaf_temp_sensors", label: "Leaf temperature" },
+  { key: "under_canopy_rh_probes", label: "Under-canopy RH probe" },
 ];
 
-/** Multi-entity role fields (actuators — several entities each). */
-const ACTUATOR_FIELDS: { key: MultiRoleKey; label: string }[] = [
+/** Substrate + light sensor roles — multiple entities each. */
+const SUBSTRATE_LIGHT_SENSOR_FIELDS: { key: SensorRoleKey; label: string }[] = [
+  { key: "vwc_sensors", label: "Substrate VWC" },
+  { key: "ec_sensors", label: "Substrate EC (pwEC)" },
+  { key: "ppfd_sensors", label: "PPFD" },
+  { key: "dli_sensors", label: "DLI" },
+];
+
+/** Air-quality sensor roles — particulate matter, multiple entities each. */
+const AIR_QUALITY_SENSOR_FIELDS: { key: SensorRoleKey; label: string }[] = [
+  { key: "pm1_sensors", label: "PM1.0" },
+  { key: "pm25_sensors", label: "PM2.5" },
+  { key: "pm4_sensors", label: "PM4.0" },
+  { key: "pm10_sensors", label: "PM10" },
+];
+
+/** Multi-entity actuator role fields — several entities each. */
+const ACTUATOR_FIELDS: { key: ActuatorRoleKey; label: string }[] = [
   { key: "light_entities", label: "Grow lights" },
   { key: "ac_entities", label: "Air conditioners" },
   { key: "dehumidifier_entities", label: "Dehumidifiers" },
@@ -261,12 +291,47 @@ export function RoomEquipmentForm({
         </CardContent>
       </Card>
 
-      {/* sensors — one reference entity each */}
+      {/* environment sensors — several entities each */}
       <Card>
         <CardContent className="p-4">
-          <SectionLabel>Sensors</SectionLabel>
+          <SectionLabel>Environment sensors</SectionLabel>
+          <p className="mb-3 text-2xs text-muted-foreground">
+            Assign every probe of each type — a room usually has several
+            temp / RH / CO2 sensors at different canopy heights.
+          </p>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {SENSOR_FIELDS.map((f) => pickerRow(f.key, f.label))}
+            {ENV_SENSOR_FIELDS.map((f) => multiPickerRow(f.key, f.label))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* substrate + light sensors */}
+      <Card>
+        <CardContent className="p-4">
+          <SectionLabel>Substrate &amp; light sensors</SectionLabel>
+          <p className="mb-3 text-2xs text-muted-foreground">
+            Substrate moisture / pore-water EC and canopy light — one
+            sensor per zone is typical, so add as many as you have.
+          </p>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {SUBSTRATE_LIGHT_SENSOR_FIELDS.map((f) =>
+              multiPickerRow(f.key, f.label),
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* air-quality sensors */}
+      <Card>
+        <CardContent className="p-4">
+          <SectionLabel>Air-quality sensors</SectionLabel>
+          <p className="mb-3 text-2xs text-muted-foreground">
+            Particulate matter — PM1.0 / PM2.5 / PM4.0 / PM10.
+          </p>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {AIR_QUALITY_SENSOR_FIELDS.map((f) =>
+              multiPickerRow(f.key, f.label),
+            )}
           </div>
         </CardContent>
       </Card>
@@ -281,6 +346,9 @@ export function RoomEquipmentForm({
           </p>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             {ACTUATOR_FIELDS.map((f) => multiPickerRow(f.key, f.label))}
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 border-t border-border pt-3 lg:grid-cols-2">
+            {pickerRow("cooling_capacity_entity", "Cooling-capacity source")}
           </div>
         </CardContent>
       </Card>

@@ -31,9 +31,11 @@ Class B proposals must respect the dehu-heat budget").
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 log = structlog.get_logger(__name__)
 
@@ -100,11 +102,19 @@ class RoomEquipmentMap(BaseModel):
             enabled.
         tank_control_enabled: Tank pH/EC chemistry control is enabled.
         co2_control_enabled: A CO2 setpoint is enabled.
-        temp_sensor: Room air-temperature sensor entity, or ``None``.
-        leaf_temp_sensor: Leaf-temperature sensor entity, or ``None``.
-        rh_sensor: Room relative-humidity sensor entity, or ``None``.
-        co2_sensor: Room CO2 sensor entity, or ``None``.
-        under_canopy_rh_probe: Under-canopy RH probe entity, or ``None``.
+        temp_sensors: Room air-temperature sensor entities.
+        rh_sensors: Room relative-humidity sensor entities.
+        co2_sensors: Room CO2 sensor entities.
+        leaf_temp_sensors: Leaf-temperature sensor entities.
+        under_canopy_rh_probes: Under-canopy RH probe entities.
+        vwc_sensors: Substrate volumetric-water-content sensor entities.
+        ec_sensors: Substrate pore-water EC (pwEC) sensor entities.
+        ppfd_sensors: PPFD light-intensity sensor entities.
+        dli_sensors: DLI (daily light integral) sensor entities.
+        pm1_sensors: PM1.0 particulate air-quality sensor entities.
+        pm25_sensors: PM2.5 particulate air-quality sensor entities.
+        pm4_sensors: PM4.0 particulate air-quality sensor entities.
+        pm10_sensors: PM10 particulate air-quality sensor entities.
         cooling_capacity_entity: A cooling-headroom source (a
             ``climate.*`` or a fan-stage entity), or ``None``.
         light_entities: Grow-light entities — dimmable lights / circuits.
@@ -127,12 +137,28 @@ class RoomEquipmentMap(BaseModel):
     tank_control_enabled: bool = False
     co2_control_enabled: bool = False
 
-    # Sensors + the headroom source — one reference entity per room.
-    temp_sensor: str | None = Field(default=None, max_length=255)
-    leaf_temp_sensor: str | None = Field(default=None, max_length=255)
-    rh_sensor: str | None = Field(default=None, max_length=255)
-    co2_sensor: str | None = Field(default=None, max_length=255)
-    under_canopy_rh_probe: str | None = Field(default=None, max_length=255)
+    # Sensors — a room routinely has several of each (multiple temp
+    # probes at different canopy heights, CO2 heads, substrate VWC / EC
+    # sensors per zone, ...). Each sensor role is therefore a LIST of
+    # entity ids. The cooling-headroom source stays a single reference.
+    #
+    # Environment.
+    temp_sensors: list[str] = Field(default_factory=list)
+    rh_sensors: list[str] = Field(default_factory=list)
+    co2_sensors: list[str] = Field(default_factory=list)
+    leaf_temp_sensors: list[str] = Field(default_factory=list)
+    under_canopy_rh_probes: list[str] = Field(default_factory=list)
+    # Substrate + light.
+    vwc_sensors: list[str] = Field(default_factory=list)
+    ec_sensors: list[str] = Field(default_factory=list)
+    ppfd_sensors: list[str] = Field(default_factory=list)
+    dli_sensors: list[str] = Field(default_factory=list)
+    # Air quality — particulate matter.
+    pm1_sensors: list[str] = Field(default_factory=list)
+    pm25_sensors: list[str] = Field(default_factory=list)
+    pm4_sensors: list[str] = Field(default_factory=list)
+    pm10_sensors: list[str] = Field(default_factory=list)
+    # The cooling-headroom source — one climate.* / fan-stage entity.
     cooling_capacity_entity: str | None = Field(default=None, max_length=255)
 
     # Actuators — a room routinely has several of each (two AC units,
@@ -148,6 +174,33 @@ class RoomEquipmentMap(BaseModel):
 
     zones: list[ZoneConfig] = Field(default_factory=list)
     tanks: list[TankConfig] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_scalar_sensors(cls, data: Any) -> Any:
+        """Fold the pre-multi-sensor scalar sensor keys forward.
+
+        Before multi-sensor support each sensor role was a single
+        ``*_sensor`` string. A room persisted under the old schema (or a
+        hand-written config) would otherwise fail ``extra='forbid'``
+        validation, so each legacy scalar value is moved into the new
+        plural list key — old ``equipment_map`` JSON still loads.
+        """
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for old, new in (
+            ("temp_sensor", "temp_sensors"),
+            ("rh_sensor", "rh_sensors"),
+            ("co2_sensor", "co2_sensors"),
+            ("leaf_temp_sensor", "leaf_temp_sensors"),
+            ("under_canopy_rh_probe", "under_canopy_rh_probes"),
+        ):
+            if old in out:
+                value = out.pop(old)
+                if value and not out.get(new):
+                    out[new] = [value]
+        return out
 
 
 class WizardFinding(BaseModel):
@@ -304,10 +357,10 @@ def _check_env_co2_hard(cfg: RoomEquipmentMap) -> list[WizardFinding]:
         missing = [
             label
             for label, present in (
-                ("temp", bool(cfg.temp_sensor)),
-                ("leaf_temp", bool(cfg.leaf_temp_sensor)),
-                ("RH", bool(cfg.rh_sensor)),
-                ("CO2", bool(cfg.co2_sensor)),
+                ("temp", bool(cfg.temp_sensors)),
+                ("leaf_temp", bool(cfg.leaf_temp_sensors)),
+                ("RH", bool(cfg.rh_sensors)),
+                ("CO2", bool(cfg.co2_sensors)),
             )
             if not present
         ]
@@ -324,7 +377,7 @@ def _check_env_co2_hard(cfg: RoomEquipmentMap) -> list[WizardFinding]:
                     ),
                 )
             )
-    if cfg.co2_control_enabled and not cfg.co2_sensor:
+    if cfg.co2_control_enabled and not cfg.co2_sensors:
         findings.append(
             WizardFinding(
                 code="co2_control_without_sensor",
@@ -442,7 +495,7 @@ def _check_warnings(cfg: RoomEquipmentMap) -> list[WizardFinding]:
         )
 
     # --- EC-009 — no under-canopy RH probe -----------------------------
-    if cfg.env_control_enabled and not cfg.under_canopy_rh_probe:
+    if cfg.env_control_enabled and not cfg.under_canopy_rh_probes:
         findings.append(
             WizardFinding(
                 code="EC-009",
@@ -497,7 +550,7 @@ def _coupling_notes(cfg: RoomEquipmentMap) -> list[str]:
             "exhaust + CO2 enrichment — suppress the exhaust before "
             "raising CO2 (EC-005)"
         )
-    if not cfg.under_canopy_rh_probe:
+    if not cfg.under_canopy_rh_probes:
         notes.append(
             "no under-canopy RH probe — room RH is not canopy-"
             "representative for dense flower (EC-009)"

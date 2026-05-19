@@ -29,9 +29,9 @@ import argparse
 import asyncio
 import contextlib
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -54,7 +54,7 @@ WORKER_NAMES = ("executor", "supervisor", "alerts", "seal")
 # ---------------------------------------------------------------------------
 
 
-def _build_executor() -> tuple[object, Callable[[object], Awaitable[None]]]:
+def _build_executor() -> tuple[object, Callable[[object], Coroutine[Any, Any, None]]]:
     """Build the :class:`~app.workers.executor.Executor` + its run coroutine.
 
     The executor needs the GUC-setting :func:`app.db.open_session` factory
@@ -107,10 +107,29 @@ def _load_rooms() -> list[RoomTickInput]:
         return entity_id.split(".", 1)[-1]
 
     def _first(seq: object) -> object:
-        # Actuator roles are lists (a room can have several AC units,
-        # light circuits, ...). RoomContext's saturation predicates take
-        # one representative entity, so use the first mapped one.
+        # Actuator/sensor roles are lists (a room can have several AC
+        # units, light circuits, temp probes, ...). RoomContext's
+        # saturation predicates take one representative entity, so use
+        # the first mapped one.
         return seq[0] if isinstance(seq, list) and seq else None
+
+    def _sensor_list(
+        eqmap: dict[str, object], plural: str, legacy: str | None = None
+    ) -> list[str]:
+        # Sensor roles are lists (a room can have several temp probes,
+        # CO2 heads, substrate sensors, ...). Read the plural key; fall
+        # back to the pre-multi-sensor scalar key so an equipment_map
+        # saved under the old schema still loads until it is re-saved.
+        raw = eqmap.get(plural)
+        if isinstance(raw, list):
+            out = [s for s in raw if isinstance(s, str) and s]
+            if out:
+                return out
+        if legacy:
+            legacy_val = eqmap.get(legacy)
+            if isinstance(legacy_val, str) and legacy_val:
+                return [legacy_val]
+        return []
 
     sync_url = get_settings().database_url.replace("+asyncpg", "+psycopg")
     rooms: list[RoomTickInput] = []
@@ -144,11 +163,28 @@ def _load_rooms() -> list[RoomTickInput]:
                             ),
                         )
                         continue
+                    temp_sensors = _sensor_list(
+                        eqmap, "temp_sensors", "temp_sensor"
+                    )
+                    rh_sensors = _sensor_list(
+                        eqmap, "rh_sensors", "rh_sensor"
+                    )
+                    co2_sensors = _sensor_list(
+                        eqmap, "co2_sensors", "co2_sensor"
+                    )
+                    leaf_sensors = _sensor_list(
+                        eqmap, "leaf_temp_sensors", "leaf_temp_sensor"
+                    )
+                    canopy_rh = _sensor_list(
+                        eqmap,
+                        "under_canopy_rh_probes",
+                        "under_canopy_rh_probe",
+                    )
                     ctx = RoomContext(
                         room_id=room_id,
-                        temp_actual_entity=_tag(eqmap.get("temp_sensor")),
-                        rh_actual_entity=_tag(eqmap.get("rh_sensor")),
-                        co2_actual_entity=_tag(eqmap.get("co2_sensor")),
+                        temp_actual_entity=_tag(_first(temp_sensors)),
+                        rh_actual_entity=_tag(_first(rh_sensors)),
+                        co2_actual_entity=_tag(_first(co2_sensors)),
                         co2_solenoid_entity=_tag(
                             _first(eqmap.get("co2_solenoid_entities"))
                         ),
@@ -161,9 +197,7 @@ def _load_rooms() -> list[RoomTickInput]:
                             "room_id": room_id,
                             "has_reheat": bool(eqmap.get("reheat_entities")),
                             "has_exhaust": bool(eqmap.get("exhaust_entities")),
-                            "has_under_canopy_rh_probe": bool(
-                                eqmap.get("under_canopy_rh_probe")
-                            ),
+                            "has_under_canopy_rh_probe": bool(canopy_rh),
                             "co2_enrichment_enabled": bool(
                                 eqmap.get("co2_control_enabled")
                             ),
@@ -172,16 +206,15 @@ def _load_rooms() -> list[RoomTickInput]:
                             ),
                         }
                     )
+                    # Staleness covers the entities the tick actually
+                    # reads — the first mapped probe of each env role.
                     sensor_tags = tuple(
                         t
                         for t in (
-                            _tag(eqmap.get(k))
-                            for k in (
-                                "temp_sensor",
-                                "rh_sensor",
-                                "co2_sensor",
-                                "leaf_temp_sensor",
-                            )
+                            _tag(_first(temp_sensors)),
+                            _tag(_first(rh_sensors)),
+                            _tag(_first(co2_sensors)),
+                            _tag(_first(leaf_sensors)),
                         )
                         if t
                     )
@@ -203,7 +236,7 @@ def _load_rooms() -> list[RoomTickInput]:
     return rooms
 
 
-def _build_supervisor() -> tuple[object, Callable[[object], Awaitable[None]]]:
+def _build_supervisor() -> tuple[object, Callable[[object], Coroutine[Any, Any, None]]]:
     """Build the :class:`~app.workers.supervisor.Supervisor` + run coroutine.
 
     The supervisor needs the GUC-setting session factory plus an Influx,
@@ -247,7 +280,7 @@ def _build_supervisor() -> tuple[object, Callable[[object], Awaitable[None]]]:
     return worker, _run
 
 
-def _build_alerts() -> tuple[object, Callable[[object], Awaitable[None]]]:
+def _build_alerts() -> tuple[object, Callable[[object], Coroutine[Any, Any, None]]]:
     """Build the :class:`~app.workers.alerts.AlertsWorker` + run coroutine.
 
     Picks :class:`~app.workers.alerts.TelegramNotifier` when a Telegram
@@ -272,7 +305,7 @@ def _build_alerts() -> tuple[object, Callable[[object], Awaitable[None]]]:
     else:
         notifier = NullNotifier()
         log.info("alerts_notifier_selected", notifier="null")
-    worker = AlertsWorker(session_factory=open_session, notifier=notifier)  # type: ignore[arg-type]
+    worker = AlertsWorker(session_factory=open_session, notifier=notifier)
 
     async def _run(w: object) -> None:
         assert isinstance(w, AlertsWorker)
@@ -306,7 +339,7 @@ async def _run_alerts_loop(
         raise
 
 
-def _build_seal() -> tuple[object, Callable[[object], Awaitable[None]]]:
+def _build_seal() -> tuple[object, Callable[[object], Coroutine[Any, Any, None]]]:
     """Build the :class:`~app.workers.seal.SealWorker` + run coroutine.
 
     The seal worker wants the *async_sessionmaker* (not the
@@ -330,7 +363,7 @@ def _build_seal() -> tuple[object, Callable[[object], Awaitable[None]]]:
 #: worker and awaits its loop. The :func:`build_worker` indirection keeps
 #: the s6 ``run`` scripts trivial and makes the wiring unit-testable.
 WORKER_FACTORIES: dict[
-    str, Callable[[], tuple[object, Callable[[object], Awaitable[None]]]]
+    str, Callable[[], tuple[object, Callable[[object], Coroutine[Any, Any, None]]]]
 ] = {
     "executor": _build_executor,
     "supervisor": _build_supervisor,
@@ -341,7 +374,7 @@ WORKER_FACTORIES: dict[
 
 def build_worker(
     name: str,
-) -> tuple[object, Callable[[object], Awaitable[None]]]:
+) -> tuple[object, Callable[[object], Coroutine[Any, Any, None]]]:
     """Build the named worker with its real dependencies.
 
     Args:
