@@ -1,18 +1,20 @@
 /**
  * Typed fetch wrappers for the Open Crop Steering FastAPI backend.
  *
- * Ingress base path
+ * Request base path
  * -----------------
- * The add-on is served through Home Assistant Ingress, which prefixes
- * every request with a per-session path like
- * `/api/hassio_ingress/<token>/`. The exported bundle cannot know that
- * prefix at build time, so this client builds **relative** URLs:
- * `apiUrl("/api/audit/events")` resolves against `document.baseURI`,
- * which the browser sets from the page's own URL (the ingress prefix).
+ * Every request is built as a ROOT-absolute URL (`/api/...`) so it does
+ * not resolve against the current page — a relative URL would break on
+ * any sub-route (`/admin/rooms/` + `api/rooms` -> `/admin/rooms/api/rooms`).
  *
- * `NEXT_PUBLIC_API_BASE` may override the base for standalone / dev use
- * (e.g. point the UI at `http://localhost:8099`); it defaults to `""`,
- * i.e. "relative to wherever this page is served from".
+ * The base is resolved at request time, in this order:
+ *
+ * 1. `NEXT_PUBLIC_API_BASE` — explicit override (dev: point the UI at
+ *    `http://localhost:8099`).
+ * 2. HA Ingress — the add-on UI is served below a per-session path
+ *    `/api/hassio_ingress/<token>/`; requests must carry that prefix, so
+ *    it is detected from `window.location.pathname`.
+ * 3. Standalone — the base is the server root (`""`).
  *
  * Errors
  * ------
@@ -46,11 +48,31 @@ import type {
   UserUpsertBody,
 } from "@/lib/types";
 
-/** Configured base. Empty string = relative to the current document. */
-const API_BASE: string =
+/** Explicit base override from the build env (dev / standalone). */
+const CONFIGURED_BASE: string =
   (typeof process !== "undefined" &&
     process.env.NEXT_PUBLIC_API_BASE?.replace(/\/+$/, "")) ||
   "";
+
+/** Matches the HA Ingress per-session prefix at the start of a path. */
+const INGRESS_PREFIX = /^(\/api\/hassio_ingress\/[^/]+)/;
+
+/**
+ * Resolve the base every request URL is prefixed with.
+ *
+ * Empty string means "the server root" — requests then go to
+ * `/api/...` absolutely, which is correct for standalone. Under HA
+ * Ingress the live page path carries the ingress prefix; we echo it
+ * back so requests stay inside the ingress tunnel.
+ */
+function resolveBase(): string {
+  if (CONFIGURED_BASE) return CONFIGURED_BASE;
+  if (typeof window !== "undefined") {
+    const prefix = window.location.pathname.match(INGRESS_PREFIX)?.[1];
+    if (prefix) return prefix;
+  }
+  return "";
+}
 
 /** An HTTP error from the backend. */
 export class ApiError extends Error {
@@ -66,13 +88,10 @@ export class ApiError extends Error {
 }
 
 /**
- * Build a request URL.
+ * Build a root-absolute request URL.
  *
- * With an empty {@link API_BASE} the returned value is a relative path
- * with the leading slash stripped (`"api/audit/events"`), so the browser
- * resolves it against the ingress-prefixed `document.baseURI` rather
- * than the server root. With an explicit base, the path is appended
- * absolutely.
+ * The returned URL always starts with `/` (or the configured/ingress
+ * base) so it resolves against the server root, never the current page.
  *
  * Exported for unit testing.
  */
@@ -80,8 +99,9 @@ export function apiUrl(
   path: string,
   query?: Record<string, string | number | boolean | undefined | null>,
 ): string {
-  const cleanPath = path.startsWith("/") ? path.slice(1) : path;
-  let url = API_BASE ? `${API_BASE}/${cleanPath}` : cleanPath;
+  const base = resolveBase();
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  let url = `${base}${cleanPath}`;
 
   if (query) {
     const params = new URLSearchParams();
