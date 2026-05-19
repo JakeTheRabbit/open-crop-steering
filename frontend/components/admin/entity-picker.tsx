@@ -113,7 +113,10 @@ export function EntityPicker({
     const out: HaEntity[] = [];
     let total = 0;
     for (const e of entities) {
-      if (areaFilter && e.area !== areaFilter) continue;
+      // areaFilter holds an area_id (the <Select> option value and the
+      // room's seeded default are both ids) — match on e.area_id, not
+      // the display name in e.area.
+      if (areaFilter && e.area_id !== areaFilter) continue;
       if (domainFilter && e.domain !== domainFilter) continue;
       if (!matchesText(e, q)) continue;
       total += 1;

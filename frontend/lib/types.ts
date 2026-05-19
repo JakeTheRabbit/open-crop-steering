@@ -360,7 +360,10 @@ export interface HaEntity {
   entity_id: string;
   name: string;
   domain: string;
+  /** Area display name (shown to the user). */
   area: string | null;
+  /** Area id — the stable key the area filter matches on. */
+  area_id: string | null;
   state: string | null;
   unit: string | null;
 }

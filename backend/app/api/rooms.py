@@ -105,7 +105,9 @@ async def ha_registry(
                     or eid
                 ),
                 "domain": _domain(eid),
+                # area is the display name; area_id is the filter key
                 "area": area_name.get(aid),
+                "area_id": aid,
                 "state": st.get("state"),
                 "unit": attrs.get("unit_of_measurement"),
             }
