@@ -94,3 +94,6 @@ influx-cache/
 *.tgz
 .cache/
 tmp/
+
+# mkdocs build output
+site/

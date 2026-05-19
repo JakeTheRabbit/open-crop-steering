@@ -26,6 +26,7 @@ EXPECTED_TABLES = {
     "sensor_snapshot",
     "llm_call_log",
     "room_runtime",  # added by migration 0002
+    "audit_chain_head",  # added by migration 0003
     "alembic_version",  # added by alembic itself
 }
 
@@ -87,6 +88,12 @@ async def test_audit_event_chain_triggers_present(session: AsyncSession) -> None
     assert "trg_audit_event_hmac_chain" in triggers
     assert "trg_audit_event_no_update" in triggers
     assert "trg_audit_event_no_delete" in triggers
+
+
+async def test_audit_chain_head_seeded(session: AsyncSession) -> None:
+    """Migration 0003 creates exactly one ``audit_chain_head`` row."""
+    result = await session.execute(text("SELECT count(*) FROM audit_chain_head"))
+    assert result.scalar_one() == 1
 
 
 async def test_recipe_revision_immutable_trigger_present(

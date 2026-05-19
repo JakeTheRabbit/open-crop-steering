@@ -12,8 +12,10 @@
 # =============================================================================
 set -e
 
+set -a  # export sourced vars so the exec'd Python process inherits them
 # shellcheck disable=SC1091
 source /run/ocs.env
+set +a
 
 bashio::log.info "alerts: waiting for Postgres + migrations..."
 until pg_isready -h 127.0.0.1 -p 5432 -U ocs >/dev/null 2>&1; do

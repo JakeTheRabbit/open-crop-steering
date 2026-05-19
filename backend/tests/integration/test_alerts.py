@@ -6,8 +6,9 @@ mute), info events never send, and the daily digest bundles warnings.
 
 The :class:`Notifier` is a :class:`FakeNotifier` recording every send,
 so the routing decisions are asserted without a real Telegram bot. The
-worker scans + acknowledges committed ``event_log`` rows, so the tests
-seed + commit on a throwaway session and clear the table between tests.
+worker scans not-yet-notified ``event_log`` rows and stamps
+``notified_at`` (never the acknowledged_* columns), so the tests seed +
+commit on a throwaway session and clear the table between tests.
 """
 
 from __future__ import annotations
@@ -49,8 +50,8 @@ class FakeNotifier:
     """A :class:`app.workers.alerts.Notifier` recording every send.
 
     Set ``fail=True`` to make :meth:`send` raise, simulating a transport
-    failure so the worker's "leave unacknowledged for retry" path can be
-    asserted.
+    failure so the worker's "leave notified_at NULL for retry" path can
+    be asserted.
     """
 
     def __init__(self, *, fail: bool = False) -> None:
@@ -131,7 +132,7 @@ async def _reload(
 async def test_critical_event_sent_immediately(
     async_engine: AsyncEngine, session: AsyncSession
 ) -> None:
-    """A critical event is sent on the first run_once and acknowledged."""
+    """A critical event is sent on the first run_once and marked notified."""
     event_id = await _seed_event(
         async_engine,
         severity=EventSeverity.critical,
@@ -150,8 +151,12 @@ async def test_critical_event_sent_immediately(
     assert "condensation risk" in text
 
     row = await _reload(session, event_id)
-    assert row.acknowledged_at is not None
-    assert row.acknowledged_by == "alerts-worker"
+    assert row.notified_at is not None
+    # Regression guard: the worker must NOT touch the human-ack columns.
+    # Those are the QAP deviation gate — auto-acking them would silently
+    # disable rollout-advance blocking.
+    assert row.acknowledged_at is None
+    assert row.acknowledged_by is None
 
 
 async def test_warning_event_sent_when_not_muted(
@@ -191,15 +196,15 @@ async def test_info_event_not_sent(
     assert handled == 1
     assert notifier.sent == []
 
-    # Still acknowledged so it does not re-process every tick.
+    # Still marked notified so it does not re-process every tick.
     row = await _reload(session, event_id)
-    assert row.acknowledged_at is not None
+    assert row.notified_at is not None
 
 
-async def test_already_acknowledged_event_is_skipped(
+async def test_already_notified_event_is_skipped(
     async_engine: AsyncEngine,
 ) -> None:
-    """A run_once over only-acknowledged rows handles nothing."""
+    """A run_once over already-notified rows handles nothing."""
     await _seed_event(
         async_engine,
         severity=EventSeverity.critical,
@@ -211,7 +216,7 @@ async def test_already_acknowledged_event_is_skipped(
     worker = AlertsWorker(_session_factory(async_engine), notifier)
 
     assert await worker.run_once() == 1
-    # Second drain: the row is acknowledged, nothing left to do.
+    # Second drain: the row is already notified, nothing left to do.
     assert await worker.run_once() == 0
     assert len(notifier.sent) == 1
 
@@ -382,10 +387,10 @@ async def test_digest_respects_since_window(
 # ---------------------------------------------------------------------------
 
 
-async def test_send_failure_leaves_event_unacknowledged(
+async def test_send_failure_leaves_event_not_notified(
     async_engine: AsyncEngine, session: AsyncSession
 ) -> None:
-    """A notifier transport failure leaves the row unacked for retry."""
+    """A notifier transport failure leaves notified_at NULL for retry."""
     event_id = await _seed_event(
         async_engine,
         severity=EventSeverity.critical,
@@ -401,7 +406,7 @@ async def test_send_failure_leaves_event_unacknowledged(
     assert handled == 0  # nothing successfully handled
 
     row = await _reload(session, event_id)
-    assert row.acknowledged_at is None  # left for a later retry
+    assert row.notified_at is None  # left for a later retry
 
     # A later run with a working notifier picks it back up.
     notifier = FakeNotifier()
@@ -432,4 +437,4 @@ async def test_null_notifier_drops_silently(
     assert handled == 1  # handled — the NullNotifier "send" succeeds
 
     row = await _reload(session, event_id)
-    assert row.acknowledged_at is not None
+    assert row.notified_at is not None

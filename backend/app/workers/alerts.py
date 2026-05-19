@@ -2,7 +2,7 @@
 
 Phase 6's notification surface. The deterministic monitors
 (:mod:`app.core.state_machine`, :mod:`app.core.equipment`) write rows to
-``event_log``; this worker turns the *unacknowledged* ones into
+``event_log``; this worker turns the *not-yet-notified* ones into
 notifications, routed by severity per plan locked decision #18:
 
 * **critical** — sent immediately, every time, **bypassing** any mute or
@@ -31,9 +31,12 @@ Notifier abstraction
 * :class:`NullNotifier` — drops everything (no Telegram configured).
 * tests use a ``FakeNotifier`` that records calls.
 
-Dispatch + digest only mark rows acknowledged after the notifier returns
-without raising — a transport failure leaves the row unacknowledged so a
-later run retries it.
+Dispatch marks a row ``notified_at`` only after the notifier returns
+without raising — a transport failure leaves ``notified_at`` NULL so a
+later run retries it. ``notified_at`` is the worker's own marker and is
+deliberately separate from ``acknowledged_at`` (a human QAP ack, which
+the rollout gate reads): the worker never writes the acknowledged_*
+columns.
 """
 
 from __future__ import annotations
@@ -59,9 +62,6 @@ log = structlog.get_logger(__name__)
 #: Advisory-lock name — only one alerts worker dispatches at a time.
 _LOCK_NAME = "alerts_dispatch"
 
-#: Marker written to ``acknowledged_by`` when this worker dispatches a
-#: row, so a human-ack and a worker-dispatch are distinguishable.
-_DISPATCH_ACTOR = "alerts-worker"
 
 #: Per-severity Telegram message prefix. ASCII-only apart from the
 #: critical siren (an escape sequence) so the file stays free of
@@ -88,7 +88,7 @@ class Notifier(Protocol):
 
     Implementations must not raise for an ordinary "message delivered"
     outcome; a raise signals a transport failure and leaves the
-    triggering event unacknowledged for retry.
+    triggering event with ``notified_at`` NULL for retry.
     """
 
     async def send(self, severity: EventSeverity, text: str) -> None:
@@ -192,20 +192,21 @@ class AlertsWorker:
     # -- dispatch ---------------------------------------------------------
 
     async def run_once(self) -> int:
-        """Dispatch every unacknowledged event once.
+        """Dispatch every not-yet-notified event once.
 
         Held under the ``alerts_dispatch`` advisory lock; if another
-        worker holds it this returns ``0``. For each unacknowledged row:
+        worker holds it this returns ``0``. For each not-yet-notified row:
 
         * **critical** — sent immediately (mute ignored), then marked
-          acknowledged.
+          ``notified_at``.
         * **warning** — sent immediately *unless* its room is muted;
-          marked acknowledged once handled (a muted warning is marked
-          acknowledged without sending, so it does not pile up — it
-          still shows on the dashboard).
-        * **info** — marked acknowledged without sending (dashboard-only).
+          marked ``notified_at`` once handled (a muted warning is marked
+          notified without sending, so it does not pile up — it still
+          shows on the dashboard).
+        * **info** — marked ``notified_at`` without sending (dashboard-only).
 
-        A row whose send raises is left unacknowledged for a later retry.
+        A row whose send raises is left with ``notified_at`` NULL for a
+        later retry.
 
         Returns:
             The number of event rows handled (sent or suppressed).
@@ -225,18 +226,18 @@ class AlertsWorker:
         return handled
 
     async def _dispatch_pending(self, session: AsyncSession) -> int:
-        """Send / suppress every unacknowledged row; return the count."""
-        rows = await self._unacknowledged(session)
+        """Send / suppress every not-yet-notified row; return the count."""
+        rows = await self._pending_dispatch(session)
         handled = 0
         for entry in rows:
             try:
                 sent = await self._handle_one(entry)
-            except Exception:  # transport failure — leave unacked, retry later
+            except Exception:  # transport failure — leave for a later retry
                 log.exception(
                     "alert_dispatch_failed", event_id=entry.id
                 )
                 continue
-            self._mark_acknowledged(entry)
+            self._mark_dispatched(entry)
             handled += 1
             log.debug(
                 "alert_handled",
@@ -249,8 +250,8 @@ class AlertsWorker:
     async def _handle_one(self, entry: EventLogEntry) -> bool:
         """Route a single event by severity. Returns whether it was sent.
 
-        Raises whatever the notifier raises, so the caller can leave the
-        row unacknowledged on a transport failure.
+        Raises whatever the notifier raises, so the caller can leave
+        ``notified_at`` NULL on a transport failure.
         """
         if entry.severity is EventSeverity.info:
             return False  # dashboard-only
@@ -311,31 +312,35 @@ class AlertsWorker:
     # -- helpers ----------------------------------------------------------
 
     @staticmethod
-    async def _unacknowledged(
+    async def _pending_dispatch(
         session: AsyncSession,
     ) -> Sequence[EventLogEntry]:
-        """Return unacknowledged event rows, oldest first."""
+        """Return rows not yet notified by this worker, oldest first."""
         result = await session.execute(
             select(EventLogEntry)
-            .where(EventLogEntry.acknowledged_at.is_(None))
+            .where(EventLogEntry.notified_at.is_(None))
             .order_by(EventLogEntry.occurred_at)
         )
         return list(result.scalars().all())
 
     @staticmethod
-    def _mark_acknowledged(entry: EventLogEntry) -> None:
-        """Stamp a row as handled by this worker."""
-        entry.acknowledged_by = _DISPATCH_ACTOR
-        entry.acknowledged_at = dt.datetime.now(dt.UTC)
+    def _mark_dispatched(entry: EventLogEntry) -> None:
+        """Stamp a row as notified by this worker.
+
+        Writes ONLY ``notified_at`` — never the acknowledged_* columns,
+        which are reserved for a human QAP acknowledgement (the
+        rollout-advance gate reads ``acknowledged_at``).
+        """
+        entry.notified_at = dt.datetime.now(dt.UTC)
 
 
-async def iter_unacknowledged(
+async def iter_pending_dispatch(
     session: AsyncSession,
 ) -> AsyncIterator[EventLogEntry]:  # pragma: no cover - convenience helper
-    """Yield unacknowledged event rows oldest-first (ad-hoc inspection)."""
+    """Yield not-yet-notified event rows oldest-first (ad-hoc inspection)."""
     result = await session.execute(
         select(EventLogEntry)
-        .where(EventLogEntry.acknowledged_at.is_(None))
+        .where(EventLogEntry.notified_at.is_(None))
         .order_by(EventLogEntry.occurred_at)
     )
     for row in result.scalars().all():

@@ -133,6 +133,9 @@ fi
   # derives them from SUPERVISOR_TOKEN, so these stay blank.
   echo "HA_URL=${OCS_HA_URL}"
   echo "HA_TOKEN=${OCS_HA_TOKEN}"
+  # Standalone-only dev auth escape hatch (blank unless the operator
+  # set OCS_DEV_AUTH); add-on mode never consults it.
+  echo "OCS_DEV_AUTH=${OCS_DEV_AUTH:-}"
 } > "${ENV_FILE}"
 chmod 600 "${ENV_FILE}"
 

@@ -200,6 +200,19 @@ async def current_identity(request: Request) -> Identity:
     Dispatches on :attr:`app.config.Settings.mode`: Ingress headers in
     add-on mode, a bearer JWT in standalone mode.
 
+    Standalone dev escape hatch
+    ---------------------------
+    When ``OCS_DEV_AUTH`` is set, standalone mode treats every request
+    as that ``users.id`` with no token — so the bundled UI is usable on
+    a private box without a login flow. This is deliberately gated:
+
+    * It is **only** consulted on the standalone branch. The regulated
+      facility runs the HA add-on (``SUPERVISOR_TOKEN`` present ->
+      add-on mode), which returns above before this code is reached —
+      the bypass is structurally unreachable there.
+    * It is off unless the operator explicitly sets the env var.
+    * Every bypassed request logs a warning.
+
     Args:
         request: The incoming request (FastAPI injects it).
 
@@ -211,6 +224,14 @@ async def current_identity(request: Request) -> Identity:
     """
     if get_settings().mode == "addon":
         return _identity_from_headers(request)
+
+    dev_user = get_settings().ocs_dev_auth.strip()
+    if dev_user:
+        log.warning("dev_auth_bypass", user_id=dev_user, path=request.url.path)
+        return Identity(
+            user_id=dev_user, display_name=dev_user, mode="standalone"
+        )
+
     return _identity_from_jwt(request)
 
 

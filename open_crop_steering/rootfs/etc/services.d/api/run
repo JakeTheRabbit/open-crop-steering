@@ -19,7 +19,9 @@
 set -e
 
 # shellcheck disable=SC1091
+set -a  # export sourced vars so the exec'd Python process inherits them
 source /run/ocs.env
+set +a
 
 MIGRATED_MARKER=/run/ocs-migrated
 

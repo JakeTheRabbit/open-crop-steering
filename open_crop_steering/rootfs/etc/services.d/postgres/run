@@ -15,7 +15,9 @@
 set -e
 
 # shellcheck disable=SC1091
+set -a  # export sourced vars for consistency with the other services
 source /run/ocs.env
+set +a
 
 PGDATA="${PGDATA:-/data/postgres}"
 PGBIN=/usr/libexec/postgresql16

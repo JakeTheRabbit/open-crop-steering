@@ -90,10 +90,22 @@ class Settings(BaseSettings):
     api_port: int = 8099
     log_level: LogLevel = "info"
 
+    # Standalone-only dev escape hatch: when set, every request is
+    # treated as this users.id with no token (see core/auth.py). Ignored
+    # entirely in add-on mode. Leave blank in any real deployment.
+    ocs_dev_auth: str = ""
+
     # --- Workers ---------------------------------------------------------
     supervisor_tick_seconds: int = 300
     executor_poll_seconds: int = 2
     seal_run_hour_utc: int = 0  # midnight UTC
+
+    # No-touch windows — recurring clock intervals where the supervisor
+    # leaves every room alone (plan locked decision #14). JSON-decoded
+    # from the NO_TOUCH_WINDOWS env var; each entry is a mapping accepted
+    # by NoTouchWindow.from_mapping ({"start","end","weekdays"?,"label"?}).
+    # Empty (the default) means no window is ever active.
+    no_touch_windows: list[dict[str, object]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _post_init(self) -> Settings:

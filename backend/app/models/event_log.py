@@ -72,6 +72,15 @@ class EventLogEntry(Base):
         Integer, nullable=True, index=True
     )
 
+    # notified_at — set by the alerts worker once it has dispatched a
+    # notification for this row. This is WORKER bookkeeping and is kept
+    # strictly separate from acknowledged_* (a human QAP acknowledgement):
+    # the rollout-advance gate keys off acknowledged_at, so the worker
+    # must never touch it.
+    notified_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     acknowledged_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     acknowledged_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
