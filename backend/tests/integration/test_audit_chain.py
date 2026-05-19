@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import pytest
 from app.core.audit import log_audit
+from app.core.seal import verify_chain
 from app.models.audit_event import AuditEvent, AuditEventType
 from app.models.user import User
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, InternalError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.fixtures.audit_chain import construct_id_chain_divergence
 
 pytestmark = pytest.mark.integration
 
@@ -233,3 +236,89 @@ async def test_concurrent_inserts_serialize_chain(async_engine) -> None:  # type
         # NOTE: we don't delete the audit_event rows — that's blocked by
         # design. They live on; that's fine for tests.
         await s.commit()
+
+
+async def test_divergence_does_not_fork_chain(session: AsyncSession) -> None:
+    """After an id/chain divergence, the next insert must not fork the chain.
+
+    The fixed trigger chains onto the explicit ``audit_chain_head``
+    pointer, so the row inserted after a divergence links onto the true
+    chain tip — not onto ``MAX(id)``. Chaining onto ``MAX(id)`` is what
+    the baseline trigger did, and it orphaned the lower-id row of the
+    diverged pair (a permanent fork).
+    """
+    pair = await construct_id_chain_divergence(session)
+    assert pair.lo_id < pair.hi_id  # divergence really constructed
+
+    # The next ordinary insert must chain onto the true tip — `lo`, the
+    # last row in chain order — and NOT onto MAX(id) == `hi`.
+    nxt = await log_audit(
+        session,
+        event_type=AuditEventType.info_event,
+        actor_id="divergence",
+        summary="after-divergence",
+    )
+    assert bytes(nxt.prev_event_hash) == pair.lo_hmac, (
+        "next insert chained onto MAX(id), not the true chain tip — fork"
+    )
+
+    # No two rows anywhere share a prev_event_hash (the fork signature).
+    forked = await session.execute(
+        text(
+            "SELECT prev_event_hash FROM audit_event "
+            "GROUP BY prev_event_hash HAVING count(*) > 1"
+        )
+    )
+    assert forked.first() is None, "two rows share a prev_event_hash — chain forked"
+
+
+async def test_many_concurrent_inserts_keep_chain_linear(async_engine) -> None:  # type: ignore[no-untyped-def]
+    """Many concurrent audit inserts always commit one intact linear chain.
+
+    Exercises the real advisory-lock race repeatedly. Whichever order
+    transactions win the lock, the head-pointer trigger keeps the chain
+    linear: verify_chain stays ok and no two rows share a predecessor.
+    With the baseline MAX(id) trigger this forked whenever a higher-id
+    transaction won the lock.
+    """
+    import asyncio  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: PLC0415
+
+    factory = async_sessionmaker(async_engine, expire_on_commit=False)
+    test_key = os.environ["HMAC_KEY_1"]
+
+    async def _insert(label: str) -> int:
+        async with factory() as s:
+            await s.execute(
+                text("SELECT set_config('audit.hmac_key_1', :v, false)"),
+                {"v": test_key},
+            )
+            ev = await log_audit(
+                s,
+                event_type=AuditEventType.info_event,
+                actor_id="concurrent-many",
+                summary=label,
+            )
+            await s.commit()
+            return ev.id
+
+    ids = await asyncio.gather(*[_insert(f"c{i}") for i in range(12)])
+    assert len(set(ids)) == 12  # all distinct, all committed
+
+    async with factory() as s:
+        await s.execute(
+            text("SELECT set_config('audit.hmac_key_1', :v, false)"),
+            {"v": test_key},
+        )
+        result = await verify_chain(s)
+        assert result.ok is True, result.message
+
+        forked = await s.execute(
+            text(
+                "SELECT 1 FROM audit_event "
+                "GROUP BY prev_event_hash HAVING count(*) > 1 LIMIT 1"
+            )
+        )
+        assert forked.first() is None, "concurrent inserts forked the chain"

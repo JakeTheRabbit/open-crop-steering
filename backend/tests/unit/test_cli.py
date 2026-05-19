@@ -71,6 +71,26 @@ class TestWorkerFactories:
         assert isinstance(worker, Supervisor)
         assert callable(run)
 
+    def test_build_supervisor_wires_no_touch_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``settings.no_touch_windows`` flows into the built Supervisor."""
+        monkeypatch.setenv(
+            "NO_TOUCH_WINDOWS",
+            '[{"start": "22:00", "end": "06:00", "label": "night"}]',
+        )
+        get_settings.cache_clear()
+        try:
+            worker, _run = cli.build_worker("supervisor")
+            assert isinstance(worker, Supervisor)
+            windows = worker._no_touch_windows
+            assert len(windows) == 1
+            assert windows[0].start == "22:00"
+            assert windows[0].end == "06:00"
+            assert windows[0].label == "night"
+        finally:
+            get_settings.cache_clear()
+
     def test_build_alerts_returns_alerts_worker(self) -> None:
         worker, run = cli.build_worker("alerts")
         assert isinstance(worker, AlertsWorker)
