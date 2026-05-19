@@ -48,23 +48,54 @@ router = APIRouter(prefix="/api/config-wizard", tags=["config-wizard"])
 
 
 class ZoneConfig(BaseModel):
-    """One irrigation zone's sensor + actuator map.
+    """One irrigation zone's valve(s) + substrate sensors.
+
+    A zone (a grow row / bench) has its own valve entity (or several)
+    that gate that zone's drippers, plus the substrate VWC / EC probes
+    crop steering reads back. The pump and the mainline / manifold
+    valves that feed the room are *room-level* — see
+    :class:`RoomEquipmentMap` — because one shot opens the shared
+    supply *and* the target zone's valve together.
 
     Attributes:
         zone_id: Zone identifier.
-        valve_entity: Per-zone irrigation valve entity, or ``None``.
-        pump_entity: Per-zone (or shared) pump entity, or ``None``.
-        vwc_sensor: Per-zone substrate VWC sensor entity, or ``None``.
-        ec_sensor: Per-zone substrate EC sensor entity, or ``None``.
+        valve_entities: This zone's irrigation valve entities.
+        vwc_sensors: This zone's substrate VWC sensor entities.
+        ec_sensors: This zone's substrate pore-water EC sensor entities.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     zone_id: str = Field(min_length=1, max_length=64)
-    valve_entity: str | None = Field(default=None, max_length=255)
-    pump_entity: str | None = Field(default=None, max_length=255)
-    vwc_sensor: str | None = Field(default=None, max_length=255)
-    ec_sensor: str | None = Field(default=None, max_length=255)
+    valve_entities: list[str] = Field(default_factory=list)
+    vwc_sensors: list[str] = Field(default_factory=list)
+    ec_sensors: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_zone_keys(cls, data: Any) -> Any:
+        """Fold the pre-multi zone schema forward.
+
+        Earlier zones used scalar ``valve_entity`` / ``vwc_sensor`` /
+        ``ec_sensor`` keys and a per-zone ``pump_entity``. The scalars
+        are folded into the new plural list keys; ``pump_entity`` is
+        dropped — the pump is now a room-level entity, since one pump
+        feeds the whole room's mainline.
+        """
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        out.pop("pump_entity", None)
+        for old, new in (
+            ("valve_entity", "valve_entities"),
+            ("vwc_sensor", "vwc_sensors"),
+            ("ec_sensor", "ec_sensors"),
+        ):
+            if old in out:
+                value = out.pop(old)
+                if value and not out.get(new):
+                    out[new] = [value]
+        return out
 
 
 class TankConfig(BaseModel):
@@ -123,6 +154,10 @@ class RoomEquipmentMap(BaseModel):
         reheat_entities: Reheat-coil entities.
         exhaust_entities: Exhaust-fan entities.
         co2_solenoid_entities: CO2 injection solenoid entities.
+        irrigation_pump_entities: Shared irrigation pump entities — the
+            pump(s) that pressurise every zone's shot.
+        mainline_valve_entities: Mainline / manifold valve entities that
+            gate the room's irrigation supply (open for every shot).
         zones: Per-zone irrigation configs.
         tanks: Per-tank chemistry configs.
     """
@@ -171,6 +206,13 @@ class RoomEquipmentMap(BaseModel):
     reheat_entities: list[str] = Field(default_factory=list)
     exhaust_entities: list[str] = Field(default_factory=list)
     co2_solenoid_entities: list[str] = Field(default_factory=list)
+
+    # Room-level irrigation supply — the pump(s) and the mainline /
+    # manifold valve(s) that gate the whole room's feed. A shot for any
+    # zone runs the pump and opens these supply valves together with
+    # that zone's own valve(s).
+    irrigation_pump_entities: list[str] = Field(default_factory=list)
+    mainline_valve_entities: list[str] = Field(default_factory=list)
 
     zones: list[ZoneConfig] = Field(default_factory=list)
     tanks: list[TankConfig] = Field(default_factory=list)
@@ -249,13 +291,27 @@ class WizardValidationResult(BaseModel):
 def _check_irrigation_hard(cfg: RoomEquipmentMap) -> list[WizardFinding]:
     """Hard refusals for irrigation control (``cultivation_knowledge.md`` S6).
 
-    Irrigation control needs a per-zone valve **and** pump on every zone,
-    and a per-zone VWC **and** EC sensor (S6.1 / S6.4). A zone missing any
-    of those is a hard refusal.
+    Irrigation control needs a shared room-level pump, at least one
+    zone, and on every zone a valve plus VWC and EC sensors (S6.1 /
+    S6.4). The mainline / manifold supply valves are recorded for the
+    executor but not hard-required — a room may feed straight off the
+    pump with no separate mainline valve.
     """
     if not cfg.irrigation_control_enabled:
         return []
     findings: list[WizardFinding] = []
+    if not cfg.irrigation_pump_entities:
+        findings.append(
+            WizardFinding(
+                code="irrigation_without_pump",
+                hard=True,
+                message=(
+                    "Irrigation control is enabled but no irrigation pump "
+                    "is mapped — a shared pump pressurises every zone's "
+                    "shot (S6.4)."
+                ),
+            )
+        )
     if not cfg.zones:
         findings.append(
             WizardFinding(
@@ -263,25 +319,25 @@ def _check_irrigation_hard(cfg: RoomEquipmentMap) -> list[WizardFinding]:
                 hard=True,
                 message=(
                     "Irrigation control is enabled but no zones are "
-                    "configured — at least one zone with a valve, pump, VWC "
-                    "and EC sensor is required (S6.4)."
+                    "configured — at least one zone with a valve, VWC and "
+                    "EC sensor is required (S6.4)."
                 ),
             )
         )
     for zone in cfg.zones:
-        if not (zone.valve_entity and zone.pump_entity):
+        if not zone.valve_entities:
             findings.append(
                 WizardFinding(
-                    code="irrigation_zone_missing_valve_or_pump",
+                    code="irrigation_zone_missing_valve",
                     hard=True,
                     message=(
                         f"Zone {zone.zone_id!r}: irrigation control is "
-                        "enabled but the zone is missing a valve and/or pump "
-                        "entity — both are required per zone (S6.4)."
+                        "enabled but the zone has no valve entity mapped "
+                        "(S6.4)."
                     ),
                 )
             )
-        if not (zone.vwc_sensor and zone.ec_sensor):
+        if not (zone.vwc_sensors and zone.ec_sensors):
             findings.append(
                 WizardFinding(
                     code="irrigation_zone_missing_vwc_or_ec_sensor",

@@ -11,6 +11,7 @@ import type {
   Room,
   RoomEquipmentMap,
   RoomUpsertBody,
+  RoomZone,
 } from "@/lib/types";
 import { PageHeader } from "@/components/page-header";
 import { QueryState, errorText } from "@/components/query-state";
@@ -46,6 +47,13 @@ function defaultEquipmentMap(
   /** Copy a list-valued field, or default to an empty list. */
   const list = (v: readonly string[] | undefined): string[] =>
     v ? [...v] : [];
+  /** Normalize a zone to the current multi-entity shape. */
+  const zone = (z: Partial<RoomZone>, i: number): RoomZone => ({
+    zone_id: z.zone_id ?? `zone${i + 1}`,
+    valve_entities: list(z.valve_entities),
+    vwc_sensors: list(z.vwc_sensors),
+    ec_sensors: list(z.ec_sensors),
+  });
   return {
     room_id: roomId,
     env_control_enabled: existing?.env_control_enabled ?? false,
@@ -73,7 +81,9 @@ function defaultEquipmentMap(
     reheat_entities: list(existing?.reheat_entities),
     exhaust_entities: list(existing?.exhaust_entities),
     co2_solenoid_entities: list(existing?.co2_solenoid_entities),
-    zones: existing?.zones ? existing.zones.map((z) => ({ ...z })) : [],
+    irrigation_pump_entities: list(existing?.irrigation_pump_entities),
+    mainline_valve_entities: list(existing?.mainline_valve_entities),
+    zones: existing?.zones ? existing.zones.map(zone) : [],
     tanks: existing?.tanks
       ? existing.tanks.map((t) => ({
           ...t,

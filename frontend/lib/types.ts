@@ -374,13 +374,18 @@ export interface HaRegistryResponse {
   entities: HaEntity[];
 }
 
-/** One irrigation zone in a {@link RoomEquipmentMap}. */
+/**
+ * One irrigation zone (a grow row / bench) in a {@link RoomEquipmentMap}.
+ *
+ * The zone owns its valve(s) and substrate probes; the pump and the
+ * mainline / manifold valves are room-level (a shot opens the shared
+ * supply and the zone valve together).
+ */
 export interface RoomZone {
   zone_id: string;
-  valve_entity: string | null;
-  pump_entity: string | null;
-  vwc_sensor: string | null;
-  ec_sensor: string | null;
+  valve_entities: string[];
+  vwc_sensors: string[];
+  ec_sensors: string[];
 }
 
 /** One nutrient tank in a {@link RoomEquipmentMap}. */
@@ -430,6 +435,10 @@ export interface RoomEquipmentMap {
   reheat_entities: string[];
   exhaust_entities: string[];
   co2_solenoid_entities: string[];
+  // room-level irrigation supply — the pump(s) + mainline / manifold
+  // valve(s) that open for every zone's shot
+  irrigation_pump_entities: string[];
+  mainline_valve_entities: string[];
   zones: RoomZone[];
   tanks: RoomTank[];
 }

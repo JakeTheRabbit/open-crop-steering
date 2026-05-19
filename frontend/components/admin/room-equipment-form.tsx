@@ -57,8 +57,16 @@ type ActuatorRoleKey =
   | "exhaust_entities"
   | "co2_solenoid_entities";
 
+/** A multi-entity room-level irrigation-supply role field. */
+type IrrigationSupplyKey =
+  | "irrigation_pump_entities"
+  | "mainline_valve_entities";
+
 /** Any multi-entity (list) role field of a {@link RoomEquipmentMap}. */
-type MultiRoleKey = SensorRoleKey | ActuatorRoleKey;
+type MultiRoleKey = SensorRoleKey | ActuatorRoleKey | IrrigationSupplyKey;
+
+/** A per-zone multi-entity field of a {@link RoomZone}. */
+type ZoneFieldKey = "valve_entities" | "vwc_sensors" | "ec_sensors";
 
 /** A control-enable boolean of a {@link RoomEquipmentMap}. */
 type ToggleKey =
@@ -131,6 +139,20 @@ const ACTUATOR_FIELDS: { key: ActuatorRoleKey; label: string }[] = [
   { key: "co2_solenoid_entities", label: "CO2 solenoids" },
 ];
 
+/** Room-level irrigation-supply role fields — open for every shot. */
+const IRRIGATION_SUPPLY_FIELDS: { key: IrrigationSupplyKey; label: string }[] =
+  [
+    { key: "irrigation_pump_entities", label: "Irrigation pump" },
+    { key: "mainline_valve_entities", label: "Mainline / manifold valves" },
+  ];
+
+/** Per-zone multi-entity role fields. */
+const ZONE_FIELDS: { key: ZoneFieldKey; label: string }[] = [
+  { key: "valve_entities", label: "Zone valve(s)" },
+  { key: "vwc_sensors", label: "Substrate VWC" },
+  { key: "ec_sensors", label: "Substrate EC (pwEC)" },
+];
+
 export interface RoomEquipmentFormProps {
   value: RoomEquipmentMap;
   onChange: (next: RoomEquipmentMap) => void;
@@ -167,10 +189,9 @@ export function RoomEquipmentForm({
   const addZone = () => {
     const next: RoomZone = {
       zone_id: `zone${value.zones.length + 1}`,
-      valve_entity: null,
-      pump_entity: null,
-      vwc_sensor: null,
-      ec_sensor: null,
+      valve_entities: [],
+      vwc_sensors: [],
+      ec_sensors: [],
     };
     patch({ zones: [...value.zones, next] });
   };
@@ -353,11 +374,22 @@ export function RoomEquipmentForm({
         </CardContent>
       </Card>
 
-      {/* zones */}
+      {/* irrigation — room-level supply + per-zone valves */}
       <Card>
         <CardContent className="p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <SectionLabel>Irrigation zones</SectionLabel>
+          <SectionLabel>Irrigation</SectionLabel>
+          <p className="mb-3 text-2xs text-muted-foreground">
+            A shot opens the shared pump and the mainline / manifold
+            valve(s) together with the target zone&apos;s own valve(s).
+          </p>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {IRRIGATION_SUPPLY_FIELDS.map((f) =>
+              multiPickerRow(f.key, f.label),
+            )}
+          </div>
+
+          <div className="mb-2 mt-4 flex items-center justify-between border-t border-border pt-3">
+            <SectionLabel>Zones / rows</SectionLabel>
             <Button
               type="button"
               size="sm"
@@ -371,7 +403,8 @@ export function RoomEquipmentForm({
           </div>
           {value.zones.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              No zones. Add one to assign valve, pump, VWC and EC entities.
+              No zones. Add one per row / bench to assign its valve(s)
+              and substrate VWC / EC sensors.
             </p>
           ) : (
             <div className="space-y-3">
@@ -406,21 +439,18 @@ export function RoomEquipmentForm({
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    {(
-                      [
-                        ["valve_entity", "Valve"],
-                        ["pump_entity", "Pump"],
-                        ["vwc_sensor", "VWC sensor"],
-                        ["ec_sensor", "EC sensor"],
-                      ] as const
-                    ).map(([key, label]) => (
+                    {ZONE_FIELDS.map(({ key, label }) => (
                       <div key={key}>
                         <label className="mb-1 block text-xs text-muted-foreground">
                           {label}
                         </label>
-                        <EntityPicker
-                          value={z[key]}
-                          onChange={(id) => updateZone(i, { [key]: id })}
+                        <MultiEntityPicker
+                          values={z[key]}
+                          onChange={(ids) =>
+                            updateZone(i, {
+                              [key]: ids,
+                            } as Partial<RoomZone>)
+                          }
                           entities={entities}
                           areas={areas}
                           entityById={entityById}

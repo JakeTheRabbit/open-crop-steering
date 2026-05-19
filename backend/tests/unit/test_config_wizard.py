@@ -75,13 +75,13 @@ class TestHardRefusals:
             {
                 "room_id": "F1",
                 "irrigation_control_enabled": True,
+                "irrigation_pump_entities": ["switch.f1_pump"],
                 "zones": [
                     {
                         "zone_id": "z1",
-                        "pump_entity": "switch.f1_pump",
-                        "vwc_sensor": "sensor.f1_z1_vwc",
-                        "ec_sensor": "sensor.f1_z1_ec",
-                        # valve_entity absent
+                        "vwc_sensors": ["sensor.f1_z1_vwc"],
+                        "ec_sensors": ["sensor.f1_z1_ec"],
+                        # valve_entities absent
                     }
                 ],
             }
@@ -90,7 +90,7 @@ class TestHardRefusals:
         body = resp.json()
         assert body["ok"] is False
         codes = {f["code"] for f in body["hard_refusals"]}
-        assert "irrigation_zone_missing_valve_or_pump" in codes
+        assert "irrigation_zone_missing_valve" in codes
 
     async def test_tank_control_without_doser_is_hard_refusal(self) -> None:
         resp = await _validate(
@@ -246,3 +246,84 @@ class TestMultiSensorRoles:
         assert resp.status_code == 200
         codes = {f["code"] for f in resp.json()["hard_refusals"]}
         assert "env_control_missing_sensors" not in codes
+
+
+class TestIrrigationSupply:
+    """Irrigation: a shared room pump + mainline valves, per-zone valves."""
+
+    @staticmethod
+    def _irrigated_room() -> dict:
+        """A room with irrigation control fully and validly equipped."""
+        return {
+            "room_id": "F1",
+            "irrigation_control_enabled": True,
+            "irrigation_pump_entities": ["switch.f1_irrigation_pump"],
+            "mainline_valve_entities": [
+                "switch.f1_mainline_valve",
+                "switch.f1_manifold_valve",
+            ],
+            "zones": [
+                {
+                    "zone_id": "zone1",
+                    "valve_entities": ["switch.f1_zone1_valve"],
+                    "vwc_sensors": ["sensor.f1_z1_vwc"],
+                    "ec_sensors": ["sensor.f1_z1_ec"],
+                }
+            ],
+        }
+
+    async def test_fully_equipped_irrigation_is_clean(self) -> None:
+        """Pump + mainline valves + a complete zone → no hard refusals."""
+        resp = await _validate(self._irrigated_room())
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["hard_refusals"] == []
+
+    async def test_irrigation_without_pump_is_hard_refusal(self) -> None:
+        """Irrigation needs a shared room-level pump."""
+        payload = self._irrigated_room()
+        del payload["irrigation_pump_entities"]
+        resp = await _validate(payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        codes = {f["code"] for f in body["hard_refusals"]}
+        assert "irrigation_without_pump" in codes
+
+    async def test_mainline_valve_absent_is_not_a_refusal(self) -> None:
+        """A room may feed straight off the pump — mainline is optional."""
+        payload = self._irrigated_room()
+        del payload["mainline_valve_entities"]
+        resp = await _validate(payload)
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    async def test_legacy_zone_keys_accepted(self) -> None:
+        """A zone saved with the pre-multi scalar keys still validates.
+
+        ``ZoneConfig`` folds the old ``valve_entity`` / ``vwc_sensor`` /
+        ``ec_sensor`` scalars into the plural lists and drops the
+        now-room-level ``pump_entity`` — so an old zone config neither
+        trips ``extra='forbid'`` nor reports a missing valve / sensor.
+        """
+        resp = await _validate(
+            {
+                "room_id": "F1",
+                "irrigation_control_enabled": True,
+                "irrigation_pump_entities": ["switch.f1_pump"],
+                "zones": [
+                    {
+                        "zone_id": "zone1",
+                        "valve_entity": "switch.f1_zone1_valve",
+                        "pump_entity": "switch.f1_pump",
+                        "vwc_sensor": "sensor.f1_z1_vwc",
+                        "ec_sensor": "sensor.f1_z1_ec",
+                    }
+                ],
+            }
+        )
+        assert resp.status_code == 200
+        codes = {f["code"] for f in resp.json()["hard_refusals"]}
+        assert "irrigation_zone_missing_valve" not in codes
+        assert "irrigation_zone_missing_vwc_or_ec_sensor" not in codes
