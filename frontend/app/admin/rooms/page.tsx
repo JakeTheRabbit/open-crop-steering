@@ -50,18 +50,28 @@ function defaultEquipmentMap(
     irrigation_control_enabled: existing?.irrigation_control_enabled ?? false,
     tank_control_enabled: existing?.tank_control_enabled ?? false,
     co2_control_enabled: existing?.co2_control_enabled ?? false,
-    lights_switch: existing?.lights_switch ?? null,
     temp_sensor: existing?.temp_sensor ?? null,
     leaf_temp_sensor: existing?.leaf_temp_sensor ?? null,
     rh_sensor: existing?.rh_sensor ?? null,
     co2_sensor: existing?.co2_sensor ?? null,
     under_canopy_rh_probe: existing?.under_canopy_rh_probe ?? null,
-    co2_solenoid: existing?.co2_solenoid ?? null,
-    dehumidifier_entity: existing?.dehumidifier_entity ?? null,
-    ac_entity: existing?.ac_entity ?? null,
-    reheat_entity: existing?.reheat_entity ?? null,
-    exhaust_entity: existing?.exhaust_entity ?? null,
     cooling_capacity_entity: existing?.cooling_capacity_entity ?? null,
+    light_entities: existing?.light_entities
+      ? [...existing.light_entities]
+      : [],
+    ac_entities: existing?.ac_entities ? [...existing.ac_entities] : [],
+    dehumidifier_entities: existing?.dehumidifier_entities
+      ? [...existing.dehumidifier_entities]
+      : [],
+    reheat_entities: existing?.reheat_entities
+      ? [...existing.reheat_entities]
+      : [],
+    exhaust_entities: existing?.exhaust_entities
+      ? [...existing.exhaust_entities]
+      : [],
+    co2_solenoid_entities: existing?.co2_solenoid_entities
+      ? [...existing.co2_solenoid_entities]
+      : [],
     zones: existing?.zones ? existing.zones.map((z) => ({ ...z })) : [],
     tanks: existing?.tanks
       ? existing.tanks.map((t) => ({

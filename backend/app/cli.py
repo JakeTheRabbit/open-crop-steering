@@ -106,6 +106,12 @@ def _load_rooms() -> list[RoomTickInput]:
             return None
         return entity_id.split(".", 1)[-1]
 
+    def _first(seq: object) -> object:
+        # Actuator roles are lists (a room can have several AC units,
+        # light circuits, ...). RoomContext's saturation predicates take
+        # one representative entity, so use the first mapped one.
+        return seq[0] if isinstance(seq, list) and seq else None
+
     sync_url = get_settings().database_url.replace("+asyncpg", "+psycopg")
     rooms: list[RoomTickInput] = []
     try:
@@ -143,16 +149,18 @@ def _load_rooms() -> list[RoomTickInput]:
                         temp_actual_entity=_tag(eqmap.get("temp_sensor")),
                         rh_actual_entity=_tag(eqmap.get("rh_sensor")),
                         co2_actual_entity=_tag(eqmap.get("co2_sensor")),
-                        co2_solenoid_entity=_tag(eqmap.get("co2_solenoid")),
+                        co2_solenoid_entity=_tag(
+                            _first(eqmap.get("co2_solenoid_entities"))
+                        ),
                         dehu_switch_entity=_tag(
-                            eqmap.get("dehumidifier_entity")
+                            _first(eqmap.get("dehumidifier_entities"))
                         ),
                     )
                     cfg = RoomConfig.from_mapping(
                         {
                             "room_id": room_id,
-                            "has_reheat": bool(eqmap.get("reheat_entity")),
-                            "has_exhaust": bool(eqmap.get("exhaust_entity")),
+                            "has_reheat": bool(eqmap.get("reheat_entities")),
+                            "has_exhaust": bool(eqmap.get("exhaust_entities")),
                             "has_under_canopy_rh_probe": bool(
                                 eqmap.get("under_canopy_rh_probe")
                             ),

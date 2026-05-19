@@ -286,3 +286,92 @@ export function EntityPicker({
     </div>
   );
 }
+
+export interface MultiEntityPickerProps {
+  /** The currently-selected entity_ids (may be empty). */
+  values: string[];
+  onChange: (next: string[]) => void;
+  entities: HaEntity[];
+  areas: HaArea[];
+  entityById: Map<string, HaEntity>;
+  defaultAreaId?: string | null;
+  disabled?: boolean;
+}
+
+/**
+ * Assign *several* HA entities to one role.
+ *
+ * A room routinely has multiple AC units, grow-light circuits, etc.
+ * This wraps {@link EntityPicker}: the selected entities show as
+ * removable rows, and a single picker below adds another (duplicates
+ * are ignored).
+ */
+export function MultiEntityPicker({
+  values,
+  onChange,
+  entities,
+  areas,
+  entityById,
+  defaultAreaId,
+  disabled = false,
+}: MultiEntityPickerProps) {
+  const add = (entityId: string | null) => {
+    if (entityId && !values.includes(entityId)) {
+      onChange([...values, entityId]);
+    }
+  };
+  const remove = (entityId: string) =>
+    onChange(values.filter((v) => v !== entityId));
+
+  return (
+    <div className="space-y-1.5">
+      {values.map((id) => {
+        const e = entityById.get(id);
+        return (
+          <div
+            key={id}
+            className="flex items-center gap-2 rounded-md border border-border bg-background px-2.5 py-1.5"
+          >
+            <span className="min-w-0 flex-1 truncate text-sm">
+              {e ? (
+                <>
+                  <span className="font-medium">{e.name}</span>
+                  <span className="ml-1.5 font-mono text-2xs text-muted-foreground">
+                    {e.entity_id}
+                  </span>
+                </>
+              ) : (
+                <span className="font-mono text-2xs text-impaired">
+                  {id} (not in registry)
+                </span>
+              )}
+            </span>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              disabled={disabled}
+              aria-label={`Remove ${id}`}
+              className="h-7 w-7 shrink-0"
+              onClick={() => remove(id)}
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        );
+      })}
+      <EntityPicker
+        value={null}
+        onChange={add}
+        entities={entities}
+        areas={areas}
+        entityById={entityById}
+        defaultAreaId={defaultAreaId}
+        disabled={disabled}
+        placeholder={
+          values.length > 0 ? "Add another entity…" : "Select an entity…"
+        }
+      />
+    </div>
+  );
+}

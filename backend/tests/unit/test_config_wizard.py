@@ -42,7 +42,7 @@ def _fully_equipped_env_room() -> dict:
         "room_id": "F1",
         "env_control_enabled": True,
         "ppfd_control_enabled": True,
-        "lights_switch": "switch.f1_lights",
+        "light_entities": ["light.f1_lights"],
         "temp_sensor": "sensor.f1_temp",
         "leaf_temp_sensor": "sensor.f1_leaf_temp",
         "rh_sensor": "sensor.f1_rh",
@@ -55,19 +55,19 @@ def _fully_equipped_env_room() -> dict:
 class TestHardRefusals:
     """A missing required coupling blocks the save."""
 
-    async def test_ppfd_without_lights_switch_is_hard_refusal(self) -> None:
+    async def test_ppfd_without_lights_is_hard_refusal(self) -> None:
         resp = await _validate(
             {
                 "room_id": "F1",
                 "ppfd_control_enabled": True,
-                # lights_switch deliberately absent
+                # light_entities deliberately absent
             }
         )
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is False
         codes = {f["code"] for f in body["hard_refusals"]}
-        assert "ppfd_without_lights_switch" in codes
+        assert "ppfd_without_lights" in codes
         assert all(f["hard"] is True for f in body["hard_refusals"])
 
     async def test_irrigation_zone_missing_valve_is_hard_refusal(self) -> None:
@@ -135,9 +135,9 @@ class TestFailSoftWarnings:
     async def test_dehu_ac_no_reheat_is_warning_not_refusal(self) -> None:
         """EC-004 — dehu + AC, no reheat: a warning, ``ok`` stays True."""
         payload = _fully_equipped_env_room()
-        payload["dehumidifier_entity"] = "switch.f1_dehu"
-        payload["ac_entity"] = "climate.f1_ac"
-        # reheat_entity deliberately absent
+        payload["dehumidifier_entities"] = ["humidifier.f1_dehu"]
+        payload["ac_entities"] = ["climate.f1_ac"]
+        # reheat_entities deliberately absent
         resp = await _validate(payload)
         assert resp.status_code == 200
         body = resp.json()
@@ -154,8 +154,8 @@ class TestFailSoftWarnings:
         """EC-005 — exhaust + CO2 enrichment: a fail-soft warning."""
         payload = _fully_equipped_env_room()
         payload["co2_control_enabled"] = True
-        payload["co2_solenoid"] = "switch.f1_co2"
-        payload["exhaust_entity"] = "fan.f1_exhaust"
+        payload["co2_solenoid_entities"] = ["switch.f1_co2"]
+        payload["exhaust_entities"] = ["fan.f1_exhaust"]
         resp = await _validate(payload)
         assert resp.status_code == 200
         body = resp.json()

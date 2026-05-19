@@ -7,8 +7,8 @@ validation has two tiers (the knowledge base's own distinction):
 
 * **Hard refusals** — a structural gap that makes the config unsafe to
   *run at all*. The config cannot be saved. Example: a PPFD setpoint is
-  enabled but no ``lights_switch`` entity is mapped, so the executor has
-  nothing to drive and no lights-on trigger.
+  enabled but no light entities are mapped, so the executor has nothing
+  to drive.
 * **Fail-soft warnings** — the config is runnable but has a known
   efficiency / risk cost the operator should see. The config saves with
   a warning banner. Example: a dehumidifier and an AC are both mapped
@@ -100,20 +100,19 @@ class RoomEquipmentMap(BaseModel):
             enabled.
         tank_control_enabled: Tank pH/EC chemistry control is enabled.
         co2_control_enabled: A CO2 setpoint is enabled.
-        lights_switch: The lights switch / light entity the executor
-            triggers on and drives, or ``None``.
         temp_sensor: Room air-temperature sensor entity, or ``None``.
         leaf_temp_sensor: Leaf-temperature sensor entity, or ``None``.
         rh_sensor: Room relative-humidity sensor entity, or ``None``.
         co2_sensor: Room CO2 sensor entity, or ``None``.
         under_canopy_rh_probe: Under-canopy RH probe entity, or ``None``.
-        co2_solenoid: CO2 injection solenoid entity, or ``None``.
-        dehumidifier_entity: Dehumidifier entity, or ``None``.
-        ac_entity: Air-conditioner / cooling entity, or ``None``.
-        reheat_entity: Reheat-coil entity, or ``None``.
-        exhaust_entity: Exhaust-fan entity, or ``None``.
         cooling_capacity_entity: A cooling-headroom source (a
             ``climate.*`` or a fan-stage entity), or ``None``.
+        light_entities: Grow-light entities — dimmable lights / circuits.
+        ac_entities: Air-conditioner / climate entities.
+        dehumidifier_entities: Dehumidifier entities.
+        reheat_entities: Reheat-coil entities.
+        exhaust_entities: Exhaust-fan entities.
+        co2_solenoid_entities: CO2 injection solenoid entities.
         zones: Per-zone irrigation configs.
         tanks: Per-tank chemistry configs.
     """
@@ -128,18 +127,24 @@ class RoomEquipmentMap(BaseModel):
     tank_control_enabled: bool = False
     co2_control_enabled: bool = False
 
-    lights_switch: str | None = Field(default=None, max_length=255)
+    # Sensors + the headroom source — one reference entity per room.
     temp_sensor: str | None = Field(default=None, max_length=255)
     leaf_temp_sensor: str | None = Field(default=None, max_length=255)
     rh_sensor: str | None = Field(default=None, max_length=255)
     co2_sensor: str | None = Field(default=None, max_length=255)
     under_canopy_rh_probe: str | None = Field(default=None, max_length=255)
-    co2_solenoid: str | None = Field(default=None, max_length=255)
-    dehumidifier_entity: str | None = Field(default=None, max_length=255)
-    ac_entity: str | None = Field(default=None, max_length=255)
-    reheat_entity: str | None = Field(default=None, max_length=255)
-    exhaust_entity: str | None = Field(default=None, max_length=255)
     cooling_capacity_entity: str | None = Field(default=None, max_length=255)
+
+    # Actuators — a room routinely has several of each (two AC units,
+    # multiple grow-light circuits, etc.), and they are climate /
+    # humidifier / dimmable-light entities, not bare on/off switches.
+    # Each role is therefore a LIST of entity ids.
+    light_entities: list[str] = Field(default_factory=list)
+    ac_entities: list[str] = Field(default_factory=list)
+    dehumidifier_entities: list[str] = Field(default_factory=list)
+    reheat_entities: list[str] = Field(default_factory=list)
+    exhaust_entities: list[str] = Field(default_factory=list)
+    co2_solenoid_entities: list[str] = Field(default_factory=list)
 
     zones: list[ZoneConfig] = Field(default_factory=list)
     tanks: list[TankConfig] = Field(default_factory=list)
@@ -149,7 +154,7 @@ class WizardFinding(BaseModel):
     """One validation finding — a hard refusal or a fail-soft warning.
 
     Attributes:
-        code: A stable machine code (e.g. ``"ppfd_without_lights_switch"``
+        code: A stable machine code (e.g. ``"ppfd_without_lights"``
             or an ``EC-*`` id).
         message: Human-readable explanation for the wizard UI.
         hard: ``True`` for a hard refusal, ``False`` for a fail-soft
@@ -330,7 +335,7 @@ def _check_env_co2_hard(cfg: RoomEquipmentMap) -> list[WizardFinding]:
                 ),
             )
         )
-    if cfg.co2_control_enabled and not cfg.co2_solenoid:
+    if cfg.co2_control_enabled and not cfg.co2_solenoid_entities:
         findings.append(
             WizardFinding(
                 code="co2_control_without_solenoid",
@@ -352,8 +357,7 @@ def _check_hard_refusals(cfg: RoomEquipmentMap) -> list[WizardFinding]:
     is a structural gap that makes an *enabled* control surface unsafe to
     run, so the config cannot be saved:
 
-    * PPFD control without a ``lights_switch`` entity (no executor
-      trigger, nothing to drive).
+    * PPFD control without any light entities (nothing to drive).
     * Irrigation gaps — see :func:`_check_irrigation_hard`.
     * Tank chemistry gaps — see :func:`_check_tank_hard`.
     * Environmental / CO2 sensor + actuator gaps — see
@@ -366,16 +370,15 @@ def _check_hard_refusals(cfg: RoomEquipmentMap) -> list[WizardFinding]:
         Every hard-refusal :class:`WizardFinding` that fired.
     """
     findings: list[WizardFinding] = []
-    if cfg.ppfd_control_enabled and not cfg.lights_switch:
+    if cfg.ppfd_control_enabled and not cfg.light_entities:
         findings.append(
             WizardFinding(
-                code="ppfd_without_lights_switch",
+                code="ppfd_without_lights",
                 hard=True,
                 message=(
-                    "PPFD setpoint control is enabled but no lights_switch "
-                    "entity is mapped. The executor triggers setpoint "
-                    "application on the lights switch and has nothing to "
-                    "drive without it (cultivation_knowledge.md S6.4)."
+                    "PPFD setpoint control is enabled but no light entities "
+                    "are mapped. The executor has nothing to drive without "
+                    "them (cultivation_knowledge.md S6.4)."
                 ),
             )
         )
@@ -409,7 +412,7 @@ def _check_warnings(cfg: RoomEquipmentMap) -> list[WizardFinding]:
     findings: list[WizardFinding] = []
 
     # --- EC-004 — dehu + AC, no reheat ---------------------------------
-    if cfg.dehumidifier_entity and cfg.ac_entity and not cfg.reheat_entity:
+    if cfg.dehumidifier_entities and cfg.ac_entities and not cfg.reheat_entities:
         findings.append(
             WizardFinding(
                 code="EC-004",
@@ -425,7 +428,7 @@ def _check_warnings(cfg: RoomEquipmentMap) -> list[WizardFinding]:
         )
 
     # --- EC-005 — exhaust + CO2 enrichment -----------------------------
-    if cfg.exhaust_entity and cfg.co2_control_enabled:
+    if cfg.exhaust_entities and cfg.co2_control_enabled:
         findings.append(
             WizardFinding(
                 code="EC-005",
@@ -484,12 +487,12 @@ def _coupling_notes(cfg: RoomEquipmentMap) -> list[str]:
         A list of short constraint notes (possibly empty).
     """
     notes: list[str] = []
-    if cfg.dehumidifier_entity and cfg.ac_entity and not cfg.reheat_entity:
+    if cfg.dehumidifier_entities and cfg.ac_entities and not cfg.reheat_entities:
         notes.append(
             "no reheat coil — Class B proposals must respect the "
             "dehu-sensible-heat budget (EC-004)"
         )
-    if cfg.exhaust_entity and cfg.co2_control_enabled:
+    if cfg.exhaust_entities and cfg.co2_control_enabled:
         notes.append(
             "exhaust + CO2 enrichment — suppress the exhaust before "
             "raising CO2 (EC-005)"
@@ -504,7 +507,7 @@ def _coupling_notes(cfg: RoomEquipmentMap) -> list[str]:
             "no cooling-headroom source — PPFD increases need an HVAC "
             "re-sizing review (EC-001)"
         )
-    if cfg.exhaust_entity:
+    if cfg.exhaust_entities:
         # An exhaust draws fresh air — flag the biosecurity constraint so
         # the supervisor knows intake filtration matters (EC-015).
         notes.append(

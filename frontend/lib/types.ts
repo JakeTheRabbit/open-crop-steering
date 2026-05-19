@@ -405,18 +405,21 @@ export interface RoomEquipmentMap {
   irrigation_control_enabled: boolean;
   tank_control_enabled: boolean;
   co2_control_enabled: boolean;
-  lights_switch: string | null;
+  // sensors + the headroom source — one reference entity per room
   temp_sensor: string | null;
   leaf_temp_sensor: string | null;
   rh_sensor: string | null;
   co2_sensor: string | null;
   under_canopy_rh_probe: string | null;
-  co2_solenoid: string | null;
-  dehumidifier_entity: string | null;
-  ac_entity: string | null;
-  reheat_entity: string | null;
-  exhaust_entity: string | null;
   cooling_capacity_entity: string | null;
+  // actuators — a room can have several of each (two AC units, multiple
+  // grow-light circuits, …), so each role is a list of entity ids
+  light_entities: string[];
+  ac_entities: string[];
+  dehumidifier_entities: string[];
+  reheat_entities: string[];
+  exhaust_entities: string[];
+  co2_solenoid_entities: string[];
   zones: RoomZone[];
   tanks: RoomTank[];
 }

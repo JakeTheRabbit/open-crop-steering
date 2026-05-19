@@ -13,7 +13,10 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { EntityPicker } from "@/components/admin/entity-picker";
+import {
+  EntityPicker,
+  MultiEntityPicker,
+} from "@/components/admin/entity-picker";
 
 /**
  * The per-room equipment-map editor.
@@ -24,20 +27,23 @@ import { EntityPicker } from "@/components/admin/entity-picker";
  * parent owns the `RoomEquipmentMap` draft and an `onChange` patcher.
  */
 
-/** A scalar entity-role field of a {@link RoomEquipmentMap}. */
+/** A single-entity role field of a {@link RoomEquipmentMap}. */
 type ScalarRoleKey =
-  | "lights_switch"
   | "temp_sensor"
   | "leaf_temp_sensor"
   | "rh_sensor"
   | "co2_sensor"
   | "under_canopy_rh_probe"
-  | "co2_solenoid"
-  | "dehumidifier_entity"
-  | "ac_entity"
-  | "reheat_entity"
-  | "exhaust_entity"
   | "cooling_capacity_entity";
+
+/** A multi-entity (list) role field of a {@link RoomEquipmentMap}. */
+type MultiRoleKey =
+  | "light_entities"
+  | "ac_entities"
+  | "dehumidifier_entities"
+  | "reheat_entities"
+  | "exhaust_entities"
+  | "co2_solenoid_entities";
 
 /** A control-enable boolean of a {@link RoomEquipmentMap}. */
 type ToggleKey =
@@ -75,33 +81,24 @@ const TOGGLES: { key: ToggleKey; label: string; hint: string }[] = [
   },
 ];
 
-/** Grouped scalar role fields, in display order. */
-const ROLE_SECTIONS: {
-  title: string;
-  fields: { key: ScalarRoleKey; label: string }[];
-}[] = [
-  {
-    title: "Sensors",
-    fields: [
-      { key: "temp_sensor", label: "Air temperature sensor" },
-      { key: "rh_sensor", label: "Relative humidity sensor" },
-      { key: "leaf_temp_sensor", label: "Leaf temperature sensor" },
-      { key: "co2_sensor", label: "CO2 sensor" },
-      { key: "under_canopy_rh_probe", label: "Under-canopy RH probe" },
-    ],
-  },
-  {
-    title: "Actuators & equipment",
-    fields: [
-      { key: "lights_switch", label: "Lights switch" },
-      { key: "dehumidifier_entity", label: "Dehumidifier" },
-      { key: "ac_entity", label: "Air conditioner" },
-      { key: "reheat_entity", label: "Reheat" },
-      { key: "exhaust_entity", label: "Exhaust" },
-      { key: "cooling_capacity_entity", label: "Cooling capacity" },
-      { key: "co2_solenoid", label: "CO2 solenoid" },
-    ],
-  },
+/** Single-entity role fields (sensors + the headroom source). */
+const SENSOR_FIELDS: { key: ScalarRoleKey; label: string }[] = [
+  { key: "temp_sensor", label: "Air temperature sensor" },
+  { key: "rh_sensor", label: "Relative humidity sensor" },
+  { key: "leaf_temp_sensor", label: "Leaf temperature sensor" },
+  { key: "co2_sensor", label: "CO2 sensor" },
+  { key: "under_canopy_rh_probe", label: "Under-canopy RH probe" },
+  { key: "cooling_capacity_entity", label: "Cooling-capacity source" },
+];
+
+/** Multi-entity role fields (actuators — several entities each). */
+const ACTUATOR_FIELDS: { key: MultiRoleKey; label: string }[] = [
+  { key: "light_entities", label: "Grow lights" },
+  { key: "ac_entities", label: "Air conditioners" },
+  { key: "dehumidifier_entities", label: "Dehumidifiers" },
+  { key: "reheat_entities", label: "Reheat" },
+  { key: "exhaust_entities", label: "Exhaust fans" },
+  { key: "co2_solenoid_entities", label: "CO2 solenoids" },
 ];
 
 export interface RoomEquipmentFormProps {
@@ -192,7 +189,7 @@ export function RoomEquipmentForm({
     });
   };
 
-  /** A labelled entity picker row. */
+  /** A labelled single-entity picker row. */
   const pickerRow = (key: ScalarRoleKey, label: string) => (
     <div key={key}>
       <label className="mb-1 block text-xs text-muted-foreground">
@@ -207,6 +204,26 @@ export function RoomEquipmentForm({
         defaultAreaId={defaultAreaId}
         disabled={disabled}
         data-testid={`picker-${key}`}
+      />
+    </div>
+  );
+
+  /** A labelled multi-entity picker row (actuators). */
+  const multiPickerRow = (key: MultiRoleKey, label: string) => (
+    <div key={key}>
+      <label className="mb-1 block text-xs text-muted-foreground">
+        {label}
+      </label>
+      <MultiEntityPicker
+        values={value[key]}
+        onChange={(ids) =>
+          patch({ [key]: ids } as Partial<RoomEquipmentMap>)
+        }
+        entities={entities}
+        areas={areas}
+        entityById={entityById}
+        defaultAreaId={defaultAreaId}
+        disabled={disabled}
       />
     </div>
   );
@@ -244,17 +261,29 @@ export function RoomEquipmentForm({
         </CardContent>
       </Card>
 
-      {/* scalar role fields */}
-      {ROLE_SECTIONS.map((section) => (
-        <Card key={section.title}>
-          <CardContent className="p-4">
-            <SectionLabel>{section.title}</SectionLabel>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              {section.fields.map((f) => pickerRow(f.key, f.label))}
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+      {/* sensors — one reference entity each */}
+      <Card>
+        <CardContent className="p-4">
+          <SectionLabel>Sensors</SectionLabel>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {SENSOR_FIELDS.map((f) => pickerRow(f.key, f.label))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* actuators — several entities each */}
+      <Card>
+        <CardContent className="p-4">
+          <SectionLabel>Actuators &amp; equipment</SectionLabel>
+          <p className="mb-3 text-2xs text-muted-foreground">
+            Each role takes multiple entities — a room often has several
+            AC units or grow-light circuits.
+          </p>
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {ACTUATOR_FIELDS.map((f) => multiPickerRow(f.key, f.label))}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* zones */}
       <Card>
