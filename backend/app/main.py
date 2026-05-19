@@ -134,10 +134,18 @@ def _mount_static_ui(application: FastAPI) -> None:
     from starlette.staticfiles import StaticFiles  # noqa: PLC0415
 
     class _SpaStaticFiles(StaticFiles):
-        """``StaticFiles`` that falls back to ``index.html`` on a 404.
+        """``StaticFiles`` for the Next.js export, with two fix-ups.
 
-        A static export has no server router; an unmatched path is a
-        client-side route, so we serve the SPA shell instead of a 404.
+        1. Asset-path normalization. The export references its assets
+           *relative* to the page (``./_next/...``), so a sub-route load
+           (``/admin/rooms/``) asks the server for
+           ``admin/rooms/_next/static/...``. Any path containing
+           ``_next/`` is rewritten to the real export-root location so
+           CSS/JS resolve from every route, in both standalone and
+           Ingress deployments.
+        2. SPA fallback. A static export has no server router; an
+           unmatched non-asset path is a client-side route, so the SPA
+           shell (``index.html``) is served instead of a 404.
         """
 
         async def get_response(self, path: str, scope: object):  # type: ignore[no-untyped-def, override]
@@ -145,10 +153,19 @@ def _mount_static_ui(application: FastAPI) -> None:
                 HTTPException as StarletteHTTPException,
             )
 
+            # (1) strip any sub-route prefix in front of a "_next/" asset
+            marker = "_next/"
+            idx = path.find(marker)
+            if idx > 0:
+                path = path[idx:]
+
             try:
                 return await super().get_response(path, scope)  # type: ignore[arg-type]
             except StarletteHTTPException as exc:
                 if exc.status_code != 404:  # noqa: PLR2004 — only 404 -> SPA shell
+                    raise
+                # (2) a genuine miss that is NOT an asset → SPA shell
+                if marker in path:
                     raise
                 return await super().get_response("index.html", scope)  # type: ignore[arg-type]
 
