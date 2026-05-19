@@ -64,6 +64,8 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+*.env
+ocs.env
 secrets.yaml
 *.pem
 *.key

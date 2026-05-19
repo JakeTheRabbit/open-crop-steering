@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     # entirely in add-on mode. Leave blank in any real deployment.
     ocs_dev_auth: str = ""
 
+    # Observe-only / shadow mode: when true the executor worker does NOT
+    # run, so the command queue is never consumed and nothing is ever
+    # written to Home Assistant via call_service. The supervisor still
+    # ticks (report-only assessments) and the UI is fully populated —
+    # this is "look but don't touch". See cli.py::_cmd_worker.
+    ocs_observe_only: bool = False
+
     # --- Workers ---------------------------------------------------------
     supervisor_tick_seconds: int = 300
     executor_poll_seconds: int = 2

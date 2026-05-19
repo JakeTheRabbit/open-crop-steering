@@ -136,6 +136,8 @@ fi
   # Standalone-only dev auth escape hatch (blank unless the operator
   # set OCS_DEV_AUTH); add-on mode never consults it.
   echo "OCS_DEV_AUTH=${OCS_DEV_AUTH:-}"
+  # Observe-only / shadow mode — when set the executor never runs.
+  echo "OCS_OBSERVE_ONLY=${OCS_OBSERVE_ONLY:-}"
 } > "${ENV_FILE}"
 chmod 600 "${ENV_FILE}"
 

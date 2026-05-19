@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -258,13 +259,39 @@ def _cmd_serve(_args: argparse.Namespace) -> int:
     return 0
 
 
+async def _idle_forever() -> None:  # pragma: no cover - signal-driven
+    """Block until the process is signalled (observe-only executor)."""
+    await asyncio.Event().wait()
+
+
 def _cmd_worker(args: argparse.Namespace) -> int:
     """Run one named worker loop — a worker s6 service.
 
     Builds the worker via :func:`build_worker` and runs its loop until
     cancelled (s6 sends SIGTERM on shutdown).
+
+    Observe-only guard: when ``OCS_OBSERVE_ONLY`` is set the ``executor``
+    worker is NOT built or run — it idles instead. The executor is the
+    only component that calls HA ``call_service``, so not running it is
+    a hard guarantee that the deployment writes nothing to Home
+    Assistant. The other workers (supervisor / alerts / seal) are
+    unaffected — they observe and report but never actuate.
     """
     name: str = args.name
+
+    if name == "executor" and get_settings().ocs_observe_only:
+        log.warning(
+            "cli_worker_observe_only",
+            worker=name,
+            detail=(
+                "OCS_OBSERVE_ONLY is set — executor disabled; the command "
+                "queue will not be consumed and nothing is written to HA"
+            ),
+        )
+        with contextlib.suppress(KeyboardInterrupt):  # pragma: no cover
+            asyncio.run(_idle_forever())
+        return 0
+
     log.info("cli_worker_start", worker=name)
     worker, run = build_worker(name)
     try:
