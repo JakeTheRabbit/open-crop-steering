@@ -134,7 +134,7 @@ def _mount_static_ui(application: FastAPI) -> None:
     from starlette.staticfiles import StaticFiles  # noqa: PLC0415
 
     class _SpaStaticFiles(StaticFiles):
-        """``StaticFiles`` for the Next.js export, with two fix-ups.
+        """``StaticFiles`` for the Next.js export, with three fix-ups.
 
         1. Asset-path normalization. The export references its assets
            *relative* to the page (``./_next/...``), so a sub-route load
@@ -146,9 +146,14 @@ def _mount_static_ui(application: FastAPI) -> None:
         2. SPA fallback. A static export has no server router; an
            unmatched non-asset path is a client-side route, so the SPA
            shell (``index.html``) is served instead of a 404.
+        3. Cache policy. ``_next/static/*`` is content-hashed, so it is
+           served ``immutable`` for a year; the HTML shell (and any
+           other non-hashed file) is served ``no-cache`` so a browser
+           revalidates and picks up a rebuilt bundle instead of serving
+           a stale one.
         """
 
-        async def get_response(self, path: str, scope: object):  # type: ignore[no-untyped-def, override]
+        async def get_response(self, path: str, scope: object):  # type: ignore[no-untyped-def]
             from starlette.exceptions import (  # noqa: PLC0415
                 HTTPException as StarletteHTTPException,
             )
@@ -160,14 +165,26 @@ def _mount_static_ui(application: FastAPI) -> None:
                 path = path[idx:]
 
             try:
-                return await super().get_response(path, scope)  # type: ignore[arg-type]
+                response = await super().get_response(path, scope)  # type: ignore[arg-type]
             except StarletteHTTPException as exc:
                 if exc.status_code != 404:  # noqa: PLR2004 — only 404 -> SPA shell
                     raise
                 # (2) a genuine miss that is NOT an asset → SPA shell
                 if marker in path:
                     raise
-                return await super().get_response("index.html", scope)  # type: ignore[arg-type]
+                response = await super().get_response("index.html", scope)  # type: ignore[arg-type]
+                path = "index.html"
+
+            # (3) cache policy — content-hashed assets are immutable;
+            # the HTML shell must revalidate so a rebuilt bundle wins
+            # over a browser-cached stale copy.
+            if path.startswith(marker):
+                response.headers["Cache-Control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            else:
+                response.headers["Cache-Control"] = "no-cache"
+            return response
 
     application.mount(
         "/",
