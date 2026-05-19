@@ -31,12 +31,17 @@ import type {
   DeviationsResponse,
   GuardrailsResponse,
   NoTouchWindowsResponse,
+  HaRegistryResponse,
   PendingApprovalDetail,
   PendingApprovalSummary,
   ReadyzResponse,
   RecipeDraftBody,
   RecipeRevision,
   RolloutResponse,
+  Room,
+  RoomDeleteResponse,
+  RoomsResponse,
+  RoomUpsertBody,
   TelegramMapResponse,
   UserUpsertBody,
 } from "@/lib/types";
@@ -234,6 +239,26 @@ export const api = {
   // no-touch windows (admin, read-only) — forward contract
   getNoTouchWindows: () =>
     request<NoTouchWindowsResponse>("/api/no-touch-windows"),
+
+  // rooms + HA entity registry (admin)
+  /** The HA area + entity registry (~8000 entities) — used by the picker. */
+  getHaRegistry: (signal?: AbortSignal) =>
+    request<HaRegistryResponse>("/api/rooms/ha-registry", { signal }),
+  /** List configured rooms with their equipment maps. */
+  listRooms: (signal?: AbortSignal) =>
+    request<RoomsResponse>("/api/rooms", { signal }),
+  /** Create or update a room; the equipment_map.room_id must match. */
+  saveRoom: (roomId: string, body: RoomUpsertBody) =>
+    request<Room>(`/api/rooms/${encodeURIComponent(roomId)}`, {
+      method: "PUT",
+      body,
+    }),
+  /** Delete a room and its equipment map. */
+  deleteRoom: (roomId: string) =>
+    request<RoomDeleteResponse>(
+      `/api/rooms/${encodeURIComponent(roomId)}`,
+      { method: "DELETE" },
+    ),
 };
 
 export type Api = typeof api;

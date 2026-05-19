@@ -15,4 +15,6 @@ export const queryKeys = {
   recipe: (roomId: string) => ["recipe", roomId] as const,
   guardrails: ["guardrails"] as const,
   noTouchWindows: ["no-touch-windows"] as const,
+  rooms: ["admin", "rooms"] as const,
+  haRegistry: ["admin", "ha-registry"] as const,
 };

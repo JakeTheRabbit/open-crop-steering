@@ -341,3 +341,104 @@ export interface NoTouchWindow {
 export interface NoTouchWindowsResponse {
   windows: NoTouchWindow[];
 }
+
+// --- rooms + HA entity registry ---------------------------------------
+//
+// Source of truth:
+//   - backend rooms router (`/api/rooms`, `/api/rooms/ha-registry`)
+//   - the RoomEquipmentMap schema (extra="forbid" — send exactly these
+//     keys; unknown fields are rejected with 422).
+
+/** A Home Assistant area; one entry of the `ha-registry` `areas` list. */
+export interface HaArea {
+  area_id: string;
+  name: string;
+}
+
+/** A Home Assistant entity; one entry of the `ha-registry` `entities` list. */
+export interface HaEntity {
+  entity_id: string;
+  name: string;
+  domain: string;
+  area: string | null;
+  state: string | null;
+  unit: string | null;
+}
+
+/** The `/api/rooms/ha-registry` response — areas + ~8000 entities. */
+export interface HaRegistryResponse {
+  areas: HaArea[];
+  entities: HaEntity[];
+}
+
+/** One irrigation zone in a {@link RoomEquipmentMap}. */
+export interface RoomZone {
+  zone_id: string;
+  valve_entity: string | null;
+  pump_entity: string | null;
+  vwc_sensor: string | null;
+  ec_sensor: string | null;
+}
+
+/** One nutrient tank in a {@link RoomEquipmentMap}. */
+export interface RoomTank {
+  tank_id: string;
+  ph_sensor: string | null;
+  ec_sensor: string | null;
+  doser_entities: string[];
+}
+
+/**
+ * Per-room HA-entity → role assignment.
+ *
+ * The backend schema is `extra="forbid"`: a PUT body must contain
+ * exactly these keys and no others. `room_id` must equal the room being
+ * saved or the PUT returns 422.
+ */
+export interface RoomEquipmentMap {
+  room_id: string;
+  env_control_enabled: boolean;
+  ppfd_control_enabled: boolean;
+  irrigation_control_enabled: boolean;
+  tank_control_enabled: boolean;
+  co2_control_enabled: boolean;
+  lights_switch: string | null;
+  temp_sensor: string | null;
+  leaf_temp_sensor: string | null;
+  rh_sensor: string | null;
+  co2_sensor: string | null;
+  under_canopy_rh_probe: string | null;
+  co2_solenoid: string | null;
+  dehumidifier_entity: string | null;
+  ac_entity: string | null;
+  reheat_entity: string | null;
+  exhaust_entity: string | null;
+  cooling_capacity_entity: string | null;
+  zones: RoomZone[];
+  tanks: RoomTank[];
+}
+
+/** A configured room; one entry of the `/api/rooms` `rooms` list. */
+export interface Room {
+  room_id: string;
+  display_name: string | null;
+  rollout_stage: string;
+  current_state: string;
+  /** A {@link RoomEquipmentMap}, or `{}` when the room is unconfigured. */
+  equipment_map: RoomEquipmentMap | Record<string, never>;
+}
+
+export interface RoomsResponse {
+  rooms: Room[];
+}
+
+/** PUT `/api/rooms/{room_id}` body. */
+export interface RoomUpsertBody {
+  display_name: string | null;
+  equipment_map: RoomEquipmentMap;
+}
+
+/** DELETE `/api/rooms/{room_id}` response. */
+export interface RoomDeleteResponse {
+  deleted: string;
+}

@@ -390,3 +390,41 @@ class HAClient:
                             f"get_states failed: {message.get('error', message)}"
                         )
                     return message.get("result", [])  # type: ignore[no-any-return]
+
+    async def list_registry(self) -> dict[str, list[dict[str, Any]]]:
+        """Fetch the area / entity / device registries over the WS API.
+
+        The room-configuration entity picker needs HA's registries to
+        show every area and the entities assigned to it. The registries
+        are only exposed over the WebSocket API — there is no REST
+        equivalent.
+
+        Returns:
+            ``{"areas": [...], "entities": [...], "devices": [...]}`` —
+            the raw registry rows exactly as HA returns them.
+        """
+        commands = (
+            ("areas", "config/area_registry/list"),
+            ("entities", "config/entity_registry/list"),
+            ("devices", "config/device_registry/list"),
+        )
+        out: dict[str, list[dict[str, Any]]] = {}
+        async with websockets.connect(
+            self._ws_url(), open_timeout=_WS_TIMEOUT, max_size=None
+        ) as ws:
+            await self._ws_authenticate(ws)
+            for idx, (key, cmd) in enumerate(commands, start=1):
+                await ws.send(json.dumps({"id": idx, "type": cmd}))
+                while True:
+                    message = json.loads(await ws.recv())
+                    if (
+                        message.get("id") == idx
+                        and message.get("type") == "result"
+                    ):
+                        if not message.get("success", False):
+                            raise HAClientError(
+                                f"{cmd} failed: {message.get('error', message)}"
+                            )
+                        out[key] = message.get("result", [])
+                        break
+        return out

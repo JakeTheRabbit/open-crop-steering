@@ -29,6 +29,7 @@ from sqlalchemy import (
     DateTime,
     String,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -87,4 +88,16 @@ class RoomRuntime(Base):
     )
     paused: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
+    )
+
+    # Operator-friendly room name shown in the UI (the HA area name).
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # The room's equipment / entity map — a serialized
+    # app.api.config_wizard.RoomEquipmentMap. This is the persisted
+    # "room store" the GUI entity picker writes and _rooms_provider
+    # reads. Admin-owned (Class E); the AI never writes it. Empty {}
+    # until an admin configures the room.
+    equipment_map: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
     )

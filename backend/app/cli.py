@@ -31,12 +31,16 @@ import contextlib
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
 from app.config import get_settings
 from app.db import get_session_factory, open_session
 from app.logging_config import configure_logging
+
+if TYPE_CHECKING:
+    from app.workers.supervisor import RoomTickInput
 
 log = structlog.get_logger(__name__)
 
@@ -71,6 +75,126 @@ def _build_executor() -> tuple[object, Callable[[object], Awaitable[None]]]:
     return worker, _run
 
 
+def _load_rooms() -> list[RoomTickInput]:
+    """Build the supervisor's room list from the persisted room store.
+
+    This IS the supervisor's ``rooms_provider`` — the supervisor calls
+    it (synchronously) once per tick. It reads ``room_runtime`` rows
+    whose ``equipment_map`` was set by the GUI entity picker; a room is
+    included only if it also has an approved recipe revision (the
+    supervisor needs effective targets to assess against). Rooms
+    configured but without a recipe are logged and skipped.
+
+    A *synchronous* DB connection is used deliberately: the
+    ``rooms_provider`` contract is synchronous, and nesting
+    ``asyncio.run`` inside it is both wrong and (on Windows) crash-prone.
+    Re-reading each tick means room-config changes are picked up without
+    a worker restart. Any DB error returns ``[]`` (logged) so one bad
+    read cannot kill the supervisor loop.
+    """
+    from sqlalchemy import create_engine, text  # noqa: PLC0415
+    from sqlalchemy.pool import NullPool  # noqa: PLC0415
+
+    from app.core.coupling_rules import RoomConfig  # noqa: PLC0415
+    from app.core.equipment import RoomContext  # noqa: PLC0415
+    from app.workers.supervisor import RoomTickInput  # noqa: PLC0415
+
+    def _tag(entity_id: object) -> str | None:
+        # InfluxDB stores HA entities under a bare entity_id tag (no
+        # domain prefix); strip "sensor."/"switch."/... here.
+        if not entity_id or not isinstance(entity_id, str):
+            return None
+        return entity_id.split(".", 1)[-1]
+
+    sync_url = get_settings().database_url.replace("+asyncpg", "+psycopg")
+    rooms: list[RoomTickInput] = []
+    try:
+        engine = create_engine(sync_url, poolclass=NullPool)
+        try:
+            with engine.connect() as conn:
+                room_rows = conn.execute(
+                    text("SELECT room_id, equipment_map FROM room_runtime")
+                ).all()
+                for room_id, equipment_map in room_rows:
+                    eqmap: dict[str, object] = equipment_map or {}
+                    if not eqmap:
+                        continue
+                    revision_id = conn.execute(
+                        text(
+                            "SELECT id FROM recipe_revision "
+                            "WHERE room_id = :r AND status = 'approved' "
+                            "ORDER BY version DESC LIMIT 1"
+                        ),
+                        {"r": room_id},
+                    ).scalar()
+                    if revision_id is None:
+                        log.warning(
+                            "room_skipped_no_recipe",
+                            room_id=room_id,
+                            detail=(
+                                "room is configured but has no approved "
+                                "recipe; the supervisor skips it until one "
+                                "is approved"
+                            ),
+                        )
+                        continue
+                    ctx = RoomContext(
+                        room_id=room_id,
+                        temp_actual_entity=_tag(eqmap.get("temp_sensor")),
+                        rh_actual_entity=_tag(eqmap.get("rh_sensor")),
+                        co2_actual_entity=_tag(eqmap.get("co2_sensor")),
+                        co2_solenoid_entity=_tag(eqmap.get("co2_solenoid")),
+                        dehu_switch_entity=_tag(
+                            eqmap.get("dehumidifier_entity")
+                        ),
+                    )
+                    cfg = RoomConfig.from_mapping(
+                        {
+                            "room_id": room_id,
+                            "has_reheat": bool(eqmap.get("reheat_entity")),
+                            "has_exhaust": bool(eqmap.get("exhaust_entity")),
+                            "has_under_canopy_rh_probe": bool(
+                                eqmap.get("under_canopy_rh_probe")
+                            ),
+                            "co2_enrichment_enabled": bool(
+                                eqmap.get("co2_control_enabled")
+                            ),
+                            "hvac_headroom_source": eqmap.get(
+                                "cooling_capacity_entity"
+                            ),
+                        }
+                    )
+                    sensor_tags = tuple(
+                        t
+                        for t in (
+                            _tag(eqmap.get(k))
+                            for k in (
+                                "temp_sensor",
+                                "rh_sensor",
+                                "co2_sensor",
+                                "leaf_temp_sensor",
+                            )
+                        )
+                        if t
+                    )
+                    rooms.append(
+                        RoomTickInput(
+                            room_id=room_id,
+                            room_context=ctx,
+                            recipe_revision_id=revision_id,
+                            sensor_entities=sensor_tags,
+                            room_config=cfg,
+                        )
+                    )
+        finally:
+            engine.dispose()
+    except Exception:  # one bad read must not kill the supervisor loop
+        log.exception("supervisor_rooms_load_failed")
+        return []
+    log.info("supervisor_rooms_loaded", count=len(rooms))
+    return rooms
+
+
 def _build_supervisor() -> tuple[object, Callable[[object], Awaitable[None]]]:
     """Build the :class:`~app.workers.supervisor.Supervisor` + run coroutine.
 
@@ -79,17 +203,16 @@ def _build_supervisor() -> tuple[object, Callable[[object], Awaitable[None]]]:
     ``settings.no_touch_windows`` — each mapping is parsed (and validated)
     by :meth:`~app.core.no_touch.NoTouchWindow.from_mapping` here, at
     worker start, so a bad window fails loudly rather than silently at
-    tick time. ``rooms_provider`` returns an empty list here: room
-    configuration is operator-supplied at runtime (Phase 11 wizard /
-    Phase 14 deploy) and is not known at process start, so v0.1 ticks
-    over an empty room set until the room store is wired. The tick loop
-    is otherwise fully live.
+    tick time. ``rooms_provider`` is :func:`_load_rooms` — the room
+    store reader — which the supervisor calls each tick to build one
+    ``RoomTickInput`` per configured room that also has an approved
+    recipe, so entity-picker changes are picked up without a restart.
     """
     from app.core.no_touch import NoTouchWindow  # noqa: PLC0415
     from app.ha_client import HAClient  # noqa: PLC0415
     from app.influx_client import InfluxClient  # noqa: PLC0415
     from app.llm_client import LLMClient  # noqa: PLC0415
-    from app.workers.supervisor import RoomTickInput, Supervisor  # noqa: PLC0415
+    from app.workers.supervisor import Supervisor  # noqa: PLC0415
 
     settings = get_settings()
     no_touch_windows = [
@@ -97,17 +220,15 @@ def _build_supervisor() -> tuple[object, Callable[[object], Awaitable[None]]]:
         for window in settings.no_touch_windows
     ]
 
-    def _rooms_provider() -> list[RoomTickInput]:
-        # No persisted room store yet — the supervisor ticks an empty
-        # set until rooms are configured. Documented in the docstring.
-        return []
-
+    # rooms_provider is the room store reader itself: the supervisor
+    # calls _load_rooms() (synchronously) each tick, so newly-configured
+    # rooms are picked up without a worker restart.
     worker = Supervisor(
         session_factory=open_session,
         influx=InfluxClient(),
         ha=HAClient(),
         llm=LLMClient(),
-        rooms_provider=_rooms_provider,
+        rooms_provider=_load_rooms,
         no_touch_windows=no_touch_windows,
     )
 

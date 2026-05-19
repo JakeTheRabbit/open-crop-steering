@@ -7,6 +7,7 @@ import {
   Cannabis,
   LayoutDashboard,
   ListChecks,
+  Plug,
   ScrollText,
   ShieldAlert,
   SlidersHorizontal,
@@ -35,6 +36,7 @@ const NAV: NavItem[] = [
 
 const ADMIN_NAV: NavItem[] = [
   { href: "/admin/users", label: "Users & Roles", icon: Users },
+  { href: "/admin/rooms", label: "Rooms & Equipment", icon: Plug },
   { href: "/admin/guardrails", label: "Guardrails", icon: ListChecks },
   { href: "/admin/no-touch-windows", label: "No-Touch Windows", icon: Clock },
 ];

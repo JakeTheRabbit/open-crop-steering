@@ -28,6 +28,7 @@ from app.api import (
     health,
     knowledge,
     rollout,
+    rooms,
 )
 from app.config import get_settings
 from app.db import dispose_engine, get_engine
@@ -105,6 +106,7 @@ app.include_router(approvals.router)
 app.include_router(knowledge.router)
 app.include_router(rollout.router)
 app.include_router(config_wizard.router)
+app.include_router(rooms.router)
 
 
 def _mount_static_ui(application: FastAPI) -> None:

@@ -144,7 +144,7 @@ async def test_audit_event_pk_index_unique(session: AsyncSession) -> None:
 async def test_room_runtime_table_present_after_upgrade(
     session: AsyncSession,
 ) -> None:
-    """Migration 0002 creates ``room_runtime`` with its expected columns."""
+    """``room_runtime`` exists with the columns 0002 + 0005 create."""
     result = await session.execute(
         text(
             "SELECT column_name FROM information_schema.columns "
@@ -153,6 +153,7 @@ async def test_room_runtime_table_present_after_upgrade(
     )
     columns = {row[0] for row in result.all()}
     assert columns == {
+        # migration 0002
         "room_id",
         "rollout_stage",
         "cycle_start_date",
@@ -160,6 +161,9 @@ async def test_room_runtime_table_present_after_upgrade(
         "muted",
         "last_tick_at",
         "paused",
+        # migration 0005 — the room store
+        "display_name",
+        "equipment_map",
     }
 
 
