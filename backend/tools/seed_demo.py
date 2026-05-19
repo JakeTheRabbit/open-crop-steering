@@ -37,10 +37,10 @@ UTC = dt.UTC
 
 # Each tuple is: id, display name, email, role.
 DEMO_USERS: tuple[tuple[str, str, str | None, RoleName | None], ...] = (
-    ("demo-operator", "Olivia Operator", "operator@rosinlab.example", RoleName.operator),
-    ("demo-cultivator", "Carl Cultivator", "cultivator@rosinlab.example", RoleName.cultivator),
-    ("demo-qap", "Quinn QAP", "qap@rosinlab.example", RoleName.qap),
-    ("demo-admin", "Avery Admin", "admin@rosinlab.example", RoleName.admin),
+    ("demo-operator", "Olivia Operator", "operator@example.com", RoleName.operator),
+    ("demo-cultivator", "Carl Cultivator", "cultivator@example.com", RoleName.cultivator),
+    ("demo-qap", "Quinn QAP", "qap@example.com", RoleName.qap),
+    ("demo-admin", "Avery Admin", "admin@example.com", RoleName.admin),
     ("ai-supervisor", "AI Supervisor", None, None),
 )
 

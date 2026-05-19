@@ -95,6 +95,14 @@ class Settings(BaseSettings):
     # entirely in add-on mode. Leave blank in any real deployment.
     ocs_dev_auth: str = ""
 
+    # Multi-tenant identity stamped onto every row in the new
+    # Convex-aligned tables (buildings, rooms, locations, sensors,
+    # equipment, ...). Mirrors AiGrowApp's `orgId` field so a future
+    # sync layer matches rows by `orgId` without translation. The
+    # default sentinel ``"open-crop-steering"`` covers single-tenant
+    # installs; real multi-tenant deployments override per-request.
+    ocs_org_id: str = "open-crop-steering"
+
     # Observe-only / shadow mode: when true the executor worker does NOT
     # run, so the command queue is never consumed and nothing is ever
     # written to Home Assistant via call_service. The supervisor still
