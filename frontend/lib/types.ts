@@ -796,3 +796,178 @@ export interface SensorIntegrationsResponse {
 export interface DeleteResponse {
   deleted: string;
 }
+
+// --- Grow recipes (phase-bound planner) -------------------------------
+//
+// Source of truth:
+//   - backend/app/schemas/cultivation.py — GrowRecipeRead etc.
+//   - backend/app/schemas/recipe_overrides.py — DayOverrideRead,
+//     EffectiveTarget.
+//
+// Wire format is camelCase (every Convex-aligned schema sets
+// populate_by_name=True; output uses field aliases). Timestamps are
+// epoch milliseconds, matching the existing Building / ConvexRoom
+// pattern. New (P1) shapes feed the phase-strip timeline; the editor +
+// resolver land in later passes.
+
+/** A `{min, max}` numeric range — the shared Convex nested shape. */
+export interface MinMaxRange {
+  min: number;
+  max: number;
+}
+
+/** One phase's lights-on / lights-off split (hours). */
+export interface LightCycle {
+  hoursOn: number;
+  hoursOff: number;
+}
+
+/**
+ * Per-phase climate band — each entry is a `MinMaxRange` or absent.
+ *
+ * Complementary to the flat `targets` map: the structured ranges feed
+ * the Convex `environmentalTargets` doc, the flat map is the OCS
+ * extension the resolver consumes for per-param overrides.
+ */
+export interface EnvironmentalTargets {
+  temperature?: MinMaxRange | null;
+  humidity?: MinMaxRange | null;
+  co2?: MinMaxRange | null;
+  vpd?: MinMaxRange | null;
+}
+
+/** One item on a phase's nutrient list. */
+export interface NutrientItem {
+  name: string;
+  dosage: string;
+  unit: string;
+}
+
+/** Per-phase nutrient programme. */
+export interface PhaseNutrients {
+  ec?: MinMaxRange | null;
+  ph?: MinMaxRange | null;
+  feedingSchedule?: string | null;
+  nutrients?: NutrientItem[] | null;
+}
+
+/** One scheduled task template attached to a phase. */
+export interface PhaseTask {
+  taskTemplate: string;
+  daysFromPhaseStartToCreate: number;
+  dueDaysAfterCreation?: number | null;
+}
+
+/**
+ * One `(value, tolerance, unit)` cell on a phase's flat target map.
+ *
+ * The shape matches `DayOverride` minus `day` / `paramName` (which are
+ * the map address), so a per-day override is a literal shadow of the
+ * phase default at that cell.
+ */
+export interface PhaseTargetSpec {
+  value: number;
+  tolerance?: number | null;
+  unit?: string | null;
+}
+
+/**
+ * One phase in a `GrowRecipe`.
+ *
+ * Convex stores `order + durationDays`; the backend's
+ * `GrowRecipeBase._populate_phase_day_boundaries` post-validator stamps
+ * 1-based `startDay` / `endDay` derived from the prefix sum of
+ * `durationDays`. Those derived fields are emitted on the wire so the
+ * planner UI does not have to recompute them.
+ */
+export interface GrowRecipePhase {
+  phaseName: string;
+  durationDays: number;
+  order: number;
+  lightCycle?: LightCycle | null;
+  environmentalTargets?: EnvironmentalTargets | null;
+  nutrients?: PhaseNutrients | null;
+  phaseTasks?: PhaseTask[] | null;
+  /** OCS-extension flat `paramName -> {value, tolerance?, unit?}` map. */
+  targets?: Record<string, PhaseTargetSpec> | null;
+  /** Derived 1-based day boundary (populated by the backend resolver). */
+  startDay?: number | null;
+  endDay?: number | null;
+}
+
+/**
+ * A persisted grow recipe — header + phases.
+ *
+ * Per-day overrides are persisted as a separate `GrowRecipeDayOverride`
+ * collection and reach the UI either through the bulk PUT endpoint's
+ * echo body or, in later passes, through `GET /effective-targets`.
+ * `GrowRecipeRead` itself does NOT denormalize them.
+ */
+export interface GrowRecipe {
+  id: string;
+  orgId: string;
+  name: string;
+  recipeType: string[];
+  description?: string | null;
+  version?: number | null;
+  isActive: boolean;
+  estimatedTotalDurationDays?: number | null;
+  phases: GrowRecipePhase[];
+  genetics?: string | null;
+  createdBy?: string | null;
+  lastModifiedBy?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** `GET /api/cultivation/grow-recipes` envelope. */
+export interface GrowRecipesResponse {
+  growRecipes: GrowRecipe[];
+}
+
+/**
+ * One persisted day-override row.
+ *
+ * Each row is one `(recipeId, day, paramName) -> {value, tolerance?,
+ * unit?}` cell that overrides the corresponding phase default.
+ */
+export interface DayOverride {
+  id: string;
+  orgId: string;
+  recipeId: string;
+  day: number;
+  paramName: string;
+  value: number;
+  tolerance?: number | null;
+  unit?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** `EffectiveTarget.source` discriminator. */
+export type EffectiveTargetSource = "phase_default" | "day_override";
+
+/**
+ * One resolved `(day, paramName) -> target` cell.
+ *
+ * Produced by `GET /api/cultivation/grow-recipes/{id}/effective-targets`
+ * (with or without a `day=N` filter). The `source` field tells the
+ * planner UI whether the cell came from the phase default map or from
+ * an override row shadowing it.
+ */
+export interface EffectiveTarget {
+  day: number;
+  paramName: string;
+  value: number;
+  tolerance?: number | null;
+  unit?: string | null;
+  phaseName: string;
+  phaseOrder: number;
+  source: EffectiveTargetSource;
+}
+
+/** `GET /api/cultivation/grow-recipes/{id}/effective-targets` envelope. */
+export interface EffectiveTargetsResponse {
+  effectiveTargets: EffectiveTarget[];
+  cycleDayCount: number;
+}

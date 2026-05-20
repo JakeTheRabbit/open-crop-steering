@@ -38,9 +38,12 @@ import type {
   ConvexRoomsResponse,
   DeleteResponse,
   DeviationsResponse,
+  EffectiveTargetsResponse,
   Equipment,
   EquipmentResponse,
   EquipmentUpsertBody,
+  GrowRecipe,
+  GrowRecipesResponse,
   GuardrailsResponse,
   HaRegistryResponse,
   Location,
@@ -428,6 +431,62 @@ export const api = {
       `/api/equipment/${encodeURIComponent(equipmentId)}`,
       { method: "DELETE" },
     ),
+
+  // --- grow recipes (phase-bound planner) -------------------------
+  //
+  // Read-only surface used by P1 of the planner redesign. The
+  // mutations (create / update / replace-overrides) land in later
+  // passes — keep this file minimal so the diff stays focused.
+  //
+  // NOTE on day-overrides: the backend exposes only PUT (bulk-replace)
+  // and GET /effective-targets. There is no dedicated GET for the raw
+  // override list, so `listDayOverrides` reads the effective-targets
+  // grid and filters down to the `day_override` rows. The result is
+  // re-shaped into the same `DayOverride[]` the bulk-PUT echoes back.
+
+  listGrowRecipes: (signal?: AbortSignal) =>
+    request<GrowRecipesResponse>("/api/cultivation/grow-recipes", {
+      signal,
+    }),
+  getGrowRecipe: (recipeId: string, signal?: AbortSignal) =>
+    request<GrowRecipe>(
+      `/api/cultivation/grow-recipes/${encodeURIComponent(recipeId)}`,
+      { signal },
+    ),
+  /**
+   * Read the override rows for a recipe.
+   *
+   * Implementation: there is no dedicated GET endpoint, so we hit
+   * `/effective-targets` (no `day=` filter) and project the
+   * `day_override` rows into a `DayOverride[]`. The synthetic shape
+   * carries the (recipeId, day, paramName, value, tolerance, unit) the
+   * timeline + day inspector need; `id`, `orgId`, `createdAt`,
+   * `updatedAt` are not surfaced by the effective-targets endpoint and
+   * are stubbed to `""` / `0`. P1 only renders pin counts by day, so
+   * the stubs are harmless. Later passes that need the real metadata
+   * can call the bulk-PUT echo or wait for a dedicated GET endpoint
+   * (flagged as a backend follow-up in the P1 report).
+   */
+  listDayOverrides: async (recipeId: string, signal?: AbortSignal) => {
+    const grid = await request<EffectiveTargetsResponse>(
+      `/api/cultivation/grow-recipes/${encodeURIComponent(recipeId)}/effective-targets`,
+      { signal },
+    );
+    return grid.effectiveTargets
+      .filter((t) => t.source === "day_override")
+      .map((t) => ({
+        id: "",
+        orgId: "",
+        recipeId,
+        day: t.day,
+        paramName: t.paramName,
+        value: t.value,
+        tolerance: t.tolerance ?? null,
+        unit: t.unit ?? null,
+        createdAt: 0,
+        updatedAt: 0,
+      }));
+  },
 };
 
 export type Api = typeof api;

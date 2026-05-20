@@ -29,4 +29,12 @@ export const queryKeys = {
     ["admin", "sensors", { roomId }] as const,
   equipmentByRoom: (roomId: string) =>
     ["admin", "equipment", { roomId }] as const,
+  // --- grow-recipe planner (phase-bound) ---
+  growRecipes: ["cultivation", "grow-recipes"] as const,
+  growRecipe: (id: string) =>
+    ["cultivation", "grow-recipe", id] as const,
+  recipeOverrides: (id: string) =>
+    ["cultivation", "grow-recipe", id, "day-overrides"] as const,
+  effectiveTargets: (id: string, day?: number) =>
+    ["cultivation", "grow-recipe", id, "effective-targets", day ?? "all"] as const,
 };
