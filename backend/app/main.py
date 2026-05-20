@@ -25,10 +25,14 @@ from app.api import (
     approvals,
     audit,
     config_wizard,
+    cultivation,
+    equipment,
     health,
     knowledge,
     rollout,
     rooms,
+    sensors,
+    sites,
 )
 from app.config import get_settings
 from app.db import dispose_engine, get_engine
@@ -107,6 +111,16 @@ app.include_router(knowledge.router)
 app.include_router(rollout.router)
 app.include_router(config_wizard.router)
 app.include_router(rooms.router)
+# Convex-aligned CRUD surfaces (pass 5-backend) — sites / sensors /
+# equipment / cultivation. The new ``sites`` router exposes the
+# Convex-aligned ``rooms`` table at /api/sites/rooms; the legacy
+# room_runtime API above stays at /api/rooms.
+app.include_router(sites.router)
+app.include_router(sensors.sensors_router)
+app.include_router(sensors.readings_router)
+app.include_router(sensors.integrations_router)
+app.include_router(equipment.router)
+app.include_router(cultivation.router)
 
 
 def _mount_static_ui(application: FastAPI) -> None:
