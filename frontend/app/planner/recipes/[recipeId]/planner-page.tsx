@@ -15,20 +15,32 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PhaseTimeline, type Selection } from "@/components/planner/phase-timeline";
+import { PhaseEditor } from "@/components/planner/phase-editor";
+import {
+  RecipeDraftProvider,
+  useRecipeDraft,
+} from "@/components/planner/recipe-draft-context";
+import { RecipeSaveBar } from "@/components/planner/recipe-save-bar";
+import { ValidationBanner } from "@/components/planner/validation-banner";
+import type { Finding } from "@/lib/planner/validator";
 
 /**
- * Recipe-canvas page (P1).
+ * Recipe-canvas page.
  *
  * Resolves the `recipeId` route param, fires the `growRecipe(id)` +
  * `recipeOverrides(id)` queries in parallel, and once both land mounts
- * a `<PhaseTimeline>` driven by their data.
+ * the canvas inside `<RecipeDraftProvider>` so every component reads
+ * from a single batched draft.
  *
- * P1 scope: read-only. Selection state lives here (so a click on a
- * phase / day visibly highlights it), but no editor side panel is
- * mounted yet — those are P2+. Wrapping in `<RecipeDraftProvider>` is
- * deferred to P2; this component is intentionally prop-driven so the
- * P2 swap is mechanical (replace the local queries with reducer state
- * sourced from context).
+ * Layout (top → bottom):
+ *
+ *  - Page header (recipe name, link back to list).
+ *  - Validation banner (when findings are present).
+ *  - Summary card (cycle / phase / param / override counts).
+ *  - Phase timeline (read-only ribbon — clicking a phase selects it).
+ *  - Two-column body: phase editor (when selected) + day inspector
+ *    slot (empty in P2; P3 fills it).
+ *  - Sticky save bar.
  */
 
 interface CanvasProps {
@@ -56,18 +68,45 @@ function paramCount(recipe: GrowRecipe): number {
 }
 
 /**
- * The actual canvas — header, summary, timeline.
+ * Inner canvas — reads draft state from the provider context.
  *
- * Pulled out as its own component so the test fixture can render it
- * directly without going through `useParams` + TanStack Query. P2 will
- * wrap this in `<RecipeDraftProvider>` and replace the props with
- * `useRecipeDraft()` context.
+ * Pulled out so the provider can wrap once and every child sees the
+ * same draft without prop-drilling. `<PlannerCanvas>` is the public
+ * boundary the page (and tests) mount.
  */
-export function PlannerCanvas({ recipe, overrides }: CanvasProps) {
+function CanvasInner() {
+  const { state, findings } = useRecipeDraft();
+  const recipe = state.recipe;
+  const overrides = state.overrides;
+
   const [selected, setSelected] = React.useState<Selection | null>(null);
 
   const days = cycleDayCount(recipe);
   const params = paramCount(recipe);
+
+  const handleFindingClick = React.useCallback((finding: Finding) => {
+    if (finding.phaseIndex != null) {
+      setSelected({ kind: "phase", phaseIndex: finding.phaseIndex });
+      // The timeline tags each phase block with its index via the
+      // `data-testid` + `data-phase-name` attributes; the simplest
+      // scroll-target locator is "the nth phase-block in the canvas".
+      if (typeof document !== "undefined") {
+        const blocks = document.querySelectorAll<HTMLElement>(
+          "[data-testid='phase-block']",
+        );
+        const target = blocks[finding.phaseIndex];
+        if (target && typeof target.scrollIntoView === "function") {
+          target.scrollIntoView({
+            behavior: "smooth",
+            block: "nearest",
+            inline: "center",
+          });
+        }
+      }
+    } else if (finding.day != null) {
+      setSelected({ kind: "day", day: finding.day });
+    }
+  }, []);
 
   return (
     <div className="space-y-4">
@@ -82,6 +121,11 @@ export function PlannerCanvas({ recipe, overrides }: CanvasProps) {
             </Link>
           </Button>
         }
+      />
+
+      <ValidationBanner
+        findings={findings}
+        onFindingClick={handleFindingClick}
       />
 
       <Card>
@@ -120,11 +164,47 @@ export function PlannerCanvas({ recipe, overrides }: CanvasProps) {
         onSelectDay={(day) => setSelected({ kind: "day", day })}
       />
 
-      <p className="text-2xs text-muted-foreground">
-        Read-only preview. Editing — phase defaults, day overrides, save /
-        discard — lands in the next planner pass.
-      </p>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div data-testid="phase-editor-slot">
+          {selected?.kind === "phase" && selected.phaseIndex != null ? (
+            <PhaseEditor phaseIndex={selected.phaseIndex} />
+          ) : (
+            <p className="rounded-md border border-dashed border-border px-3 py-6 text-2xs text-muted-foreground">
+              Click a phase on the timeline above to edit its defaults.
+            </p>
+          )}
+        </div>
+        <div data-testid="day-inspector-slot">
+          {/* Day inspector lands in P3. For P2 the slot stays empty. */}
+          <p className="rounded-md border border-dashed border-border px-3 py-6 text-2xs text-muted-foreground">
+            Day inspector coming in the next planner pass.
+          </p>
+        </div>
+      </div>
+
+      <RecipeSaveBar />
     </div>
+  );
+}
+
+/**
+ * Mount the draft provider seeded by server data, then render the
+ * canvas inside it.
+ *
+ * `key={recipe.id}` forces a fresh provider when the operator navigates
+ * between recipes — the reducer's internal state isn't safe to carry
+ * over across recipes (undo stack would contain phases from the
+ * previous one).
+ */
+export function PlannerCanvas({ recipe, overrides }: CanvasProps) {
+  return (
+    <RecipeDraftProvider
+      key={recipe.id}
+      recipe={recipe}
+      overrides={overrides}
+    >
+      <CanvasInner />
+    </RecipeDraftProvider>
   );
 }
 

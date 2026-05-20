@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 
 import { PlannerCanvas } from "@/app/planner/recipes/[recipeId]/planner-page";
 import type { DayOverride, GrowRecipe } from "@/lib/types";
+import { renderWithQuery } from "./render";
 
 /**
  * Smoke test for the P1 recipe-canvas component.
@@ -98,7 +99,7 @@ function overridesFixture(): DayOverride[] {
 
 describe("PlannerCanvas (P1)", () => {
   it("renders one phase block per phase with the right day range", () => {
-    render(
+    renderWithQuery(
       <PlannerCanvas
         recipe={recipeFixture()}
         overrides={overridesFixture()}
@@ -122,7 +123,7 @@ describe("PlannerCanvas (P1)", () => {
   });
 
   it("renders one pin marker per day that has overrides", () => {
-    render(
+    renderWithQuery(
       <PlannerCanvas
         recipe={recipeFixture()}
         overrides={overridesFixture()}
@@ -140,7 +141,7 @@ describe("PlannerCanvas (P1)", () => {
   });
 
   it("surfaces the right summary badges in the recipe header", () => {
-    render(
+    renderWithQuery(
       <PlannerCanvas
         recipe={recipeFixture()}
         overrides={overridesFixture()}
@@ -161,7 +162,7 @@ describe("PlannerCanvas (P1)", () => {
   });
 
   it("renders the day axis with at least the first and last ticks", () => {
-    render(
+    renderWithQuery(
       <PlannerCanvas
         recipe={recipeFixture()}
         overrides={overridesFixture()}

@@ -971,3 +971,57 @@ export interface EffectiveTargetsResponse {
   effectiveTargets: EffectiveTarget[];
   cycleDayCount: number;
 }
+
+/**
+ * `GET /api/cultivation/grow-recipes/{id}/day-overrides` envelope.
+ *
+ * P2 of the planner redesign reads this endpoint (added in parallel by
+ * the backend pass) instead of filtering the dense effective-targets
+ * grid the way P1 did. The body shape matches the bulk-replace PUT's
+ * echo response so the same parser handles both.
+ */
+export interface DayOverridesListResponse {
+  overrides: DayOverride[];
+}
+
+/**
+ * Body for `PUT /api/cultivation/grow-recipes/{id}/day-overrides`.
+ *
+ * Bulk-replaces every override row for the recipe atomically — see
+ * the FastAPI handler in `app/api/cultivation.py`. Each entry is the
+ * input form of one override (no `id`/`orgId`/timestamps; the path
+ * carries the `recipeId`).
+ */
+export interface DayOverrideInput {
+  day: number;
+  paramName: string;
+  value: number;
+  tolerance?: number | null;
+  unit?: string | null;
+}
+
+export interface DayOverridesBulkReplaceBody {
+  overrides: DayOverrideInput[];
+}
+
+/**
+ * Body for `PUT /api/cultivation/grow-recipes/{id}` — the recipe
+ * update endpoint.
+ *
+ * Mirrors `GrowRecipeCreate` from `backend/app/schemas/cultivation.py`:
+ * every mutable field of `GrowRecipeBase` plus `genetics`. Fields are
+ * camelCase on the wire; `populate_by_name=True` means snake_case
+ * works too, but matching the AiGrowApp wire shape avoids confusion.
+ */
+export interface GrowRecipeUpdateBody {
+  name: string;
+  recipeType: string[];
+  description?: string | null;
+  version?: number | null;
+  isActive: boolean;
+  estimatedTotalDurationDays?: number | null;
+  phases: GrowRecipePhase[];
+  genetics?: string | null;
+  createdBy?: string | null;
+  lastModifiedBy?: string | null;
+}

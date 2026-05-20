@@ -420,6 +420,86 @@ class TestGrowRecipeEffectiveTargets:
         assert resp.status_code == 404
 
 
+class TestListDayOverrides:
+    """GET /grow-recipes/{id}/day-overrides — surgical-read endpoint."""
+
+    def _recipe(self) -> GrowRecipe:
+        return GrowRecipe(
+            id="r-1",
+            org_id=_FAKE_ORG,
+            name="Standard 14-day",
+            recipe_type=["indoor"],
+            is_active=True,
+            phases=[
+                {
+                    "phaseName": "Veg",
+                    "durationDays": 14.0,
+                    "order": 1.0,
+                    "targets": {
+                        "temp_day": {
+                            "value": 25.0,
+                            "tolerance": 0.5,
+                            "unit": "C",
+                        }
+                    },
+                }
+            ],
+            created_at=_FIXED_NOW,
+            updated_at=_FIXED_NOW,
+        )
+
+    async def test_returns_overrides_with_ids_and_timestamps(self) -> None:
+        recipe = self._recipe()
+        ov1 = GrowRecipeDayOverride(
+            id="ov-1",
+            org_id=_FAKE_ORG,
+            recipe_id="r-1",
+            day=3,
+            param_name="temp_day",
+            value=24.0,
+            tolerance=0.3,
+            unit="C",
+            created_at=_FIXED_NOW,
+            updated_at=_FIXED_NOW,
+        )
+        ov2 = GrowRecipeDayOverride(
+            id="ov-2",
+            org_id=_FAKE_ORG,
+            recipe_id="r-1",
+            day=5,
+            param_name="temp_day",
+            value=26.0,
+            created_at=_FIXED_NOW,
+            updated_at=_FIXED_NOW,
+        )
+        session = _FakeSession(prefilled=[recipe, ov1, ov2])
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/cultivation/grow-recipes/r-1/day-overrides"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        overrides = body["overrides"]
+        assert len(overrides) == 2
+        # Every row carries the persisted id, recipeId, and timestamps —
+        # this is the whole point of the endpoint (reducer parity).
+        ids = {o["id"] for o in overrides}
+        assert ids == {"ov-1", "ov-2"}
+        assert all(o["recipeId"] == "r-1" for o in overrides)
+        assert all(o["orgId"] == _FAKE_ORG for o in overrides)
+        assert all("createdAt" in o and "updatedAt" in o for o in overrides)
+        # camelCase keys.
+        assert all("paramName" in o for o in overrides)
+
+    async def test_unknown_recipe_404(self) -> None:
+        session = _FakeSession()
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/cultivation/grow-recipes/no-such/day-overrides"
+            )
+        assert resp.status_code == 404
+
+
 class TestReplaceDayOverrides:
     """PUT /grow-recipes/{id}/day-overrides — bulk DELETE-then-INSERT."""
 

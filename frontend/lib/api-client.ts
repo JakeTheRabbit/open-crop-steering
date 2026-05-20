@@ -36,13 +36,15 @@ import type {
   ConvexRoom,
   ConvexRoomUpsertBody,
   ConvexRoomsResponse,
+  DayOverridesBulkReplaceBody,
+  DayOverridesListResponse,
   DeleteResponse,
   DeviationsResponse,
-  EffectiveTargetsResponse,
   Equipment,
   EquipmentResponse,
   EquipmentUpsertBody,
   GrowRecipe,
+  GrowRecipeUpdateBody,
   GrowRecipesResponse,
   GuardrailsResponse,
   HaRegistryResponse,
@@ -434,15 +436,10 @@ export const api = {
 
   // --- grow recipes (phase-bound planner) -------------------------
   //
-  // Read-only surface used by P1 of the planner redesign. The
-  // mutations (create / update / replace-overrides) land in later
-  // passes — keep this file minimal so the diff stays focused.
-  //
-  // NOTE on day-overrides: the backend exposes only PUT (bulk-replace)
-  // and GET /effective-targets. There is no dedicated GET for the raw
-  // override list, so `listDayOverrides` reads the effective-targets
-  // grid and filters down to the `day_override` rows. The result is
-  // re-shaped into the same `DayOverride[]` the bulk-PUT echoes back.
+  // P1 added read wrappers; P2 adds the mutations needed by the
+  // batched-draft save flow (recipe header PUT + override bulk
+  // PUT) and switches `listDayOverrides` to the dedicated GET
+  // endpoint the backend added in parallel.
 
   listGrowRecipes: (signal?: AbortSignal) =>
     request<GrowRecipesResponse>("/api/cultivation/grow-recipes", {
@@ -454,39 +451,59 @@ export const api = {
       { signal },
     ),
   /**
+   * Replace a grow recipe's mutable fields.
+   *
+   * Mirrors `PUT /api/cultivation/grow-recipes/{id}`. The body must be
+   * the same camelCase wire shape as `GrowRecipeCreate` (alias-keyed,
+   * matching `model_dump(by_alias=True)` on the Pydantic schema).
+   *
+   * Returns the server's view of the updated recipe — the planner's
+   * save flow dispatches `LOAD_FROM_SERVER` with this so `savedSnapshot`
+   * resets cleanly.
+   */
+  updateGrowRecipe: (recipeId: string, body: GrowRecipeUpdateBody) =>
+    request<GrowRecipe>(
+      `/api/cultivation/grow-recipes/${encodeURIComponent(recipeId)}`,
+      { method: "PUT", body },
+    ),
+  /**
    * Read the override rows for a recipe.
    *
-   * Implementation: there is no dedicated GET endpoint, so we hit
-   * `/effective-targets` (no `day=` filter) and project the
-   * `day_override` rows into a `DayOverride[]`. The synthetic shape
-   * carries the (recipeId, day, paramName, value, tolerance, unit) the
-   * timeline + day inspector need; `id`, `orgId`, `createdAt`,
-   * `updatedAt` are not surfaced by the effective-targets endpoint and
-   * are stubbed to `""` / `0`. P1 only renders pin counts by day, so
-   * the stubs are harmless. Later passes that need the real metadata
-   * can call the bulk-PUT echo or wait for a dedicated GET endpoint
-   * (flagged as a backend follow-up in the P1 report).
+   * Hits the dedicated GET endpoint added in the P2 backend dispatch:
+   * `GET /api/cultivation/grow-recipes/{id}/day-overrides` returns
+   * `{overrides: DayOverrideRead[]}` with full `id` / `orgId` /
+   * timestamps populated. The planner UI uses the rich metadata to
+   * cross-check after save and for the day inspector's pin list.
    */
   listDayOverrides: async (recipeId: string, signal?: AbortSignal) => {
-    const grid = await request<EffectiveTargetsResponse>(
-      `/api/cultivation/grow-recipes/${encodeURIComponent(recipeId)}/effective-targets`,
+    const response = await request<DayOverridesListResponse>(
+      `/api/cultivation/grow-recipes/${encodeURIComponent(recipeId)}/day-overrides`,
       { signal },
     );
-    return grid.effectiveTargets
-      .filter((t) => t.source === "day_override")
-      .map((t) => ({
-        id: "",
-        orgId: "",
-        recipeId,
-        day: t.day,
-        paramName: t.paramName,
-        value: t.value,
-        tolerance: t.tolerance ?? null,
-        unit: t.unit ?? null,
-        createdAt: 0,
-        updatedAt: 0,
-      }));
+    return response.overrides;
   },
+  /**
+   * Bulk-replace every override row for a recipe atomically.
+   *
+   * Mirrors `PUT /api/cultivation/grow-recipes/{id}/day-overrides` —
+   * the server deletes every existing override and inserts the new
+   * set in one transaction. The body is the same shape the GET
+   * endpoint above echoes (minus `id` / `orgId` / timestamps).
+   *
+   * The handler returns the bulk-replace echo body which carries the
+   * freshly-persisted rows; the save flow re-runs `listDayOverrides`
+   * after success to seed `savedSnapshot`, so we don't strictly need
+   * the echo — but we surface it as the unknown JSON the handler
+   * sends back so the test mocks have something concrete to assert.
+   */
+  replaceDayOverrides: (
+    recipeId: string,
+    body: DayOverridesBulkReplaceBody,
+  ) =>
+    request<unknown>(
+      `/api/cultivation/grow-recipes/${encodeURIComponent(recipeId)}/day-overrides`,
+      { method: "PUT", body },
+    ),
 };
 
 export type Api = typeof api;

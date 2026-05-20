@@ -908,6 +908,75 @@ async def get_effective_targets(
     }
 
 
+@router.get(
+    "/grow-recipes/{recipe_id}/day-overrides",
+    response_model_by_alias=True,
+)
+async def list_day_overrides(
+    recipe_id: str,
+    identity: Annotated[Identity, Depends(require_role(RoleName.admin))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, Any]:
+    """List every per-day override row for one recipe.
+
+    Returns the persisted override rows with ``id`` and timestamps
+    intact, in the same wire shape the bulk-replace PUT accepts/returns
+    on its body. Lets the planner UI's reducer apply surgical updates
+    instead of going through the dense ``/effective-targets`` grid.
+    """
+    settings = get_settings()
+    recipe = await session.get(GrowRecipe, recipe_id)
+    if recipe is None or recipe.org_id != settings.ocs_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"grow recipe '{recipe_id}' not found",
+        )
+
+    rows = (
+        await session.execute(
+            select(GrowRecipeDayOverride)
+            .where(
+                GrowRecipeDayOverride.recipe_id == recipe_id,
+                GrowRecipeDayOverride.org_id == settings.ocs_org_id,
+            )
+            .order_by(
+                GrowRecipeDayOverride.day,
+                GrowRecipeDayOverride.param_name,
+            )
+        )
+    ).scalars()
+    overrides = [
+        DayOverrideRead.model_validate(r).model_dump(
+            mode="json", by_alias=True
+        )
+        for r in rows
+    ]
+
+    await log_audit(
+        session,
+        event_type=AuditEventType.info_event,
+        actor_id=identity.user_id,
+        actor_role="admin",
+        summary=(
+            f"Grow recipe '{recipe.name}' day-overrides listed "
+            f"(count={len(overrides)})"
+        ),
+        params={
+            "grow_recipe_id": recipe.id,
+            "count": len(overrides),
+        },
+    )
+    await session.commit()
+
+    log.info(
+        "grow_recipe_day_overrides_listed",
+        actor=identity.user_id,
+        grow_recipe_id=recipe_id,
+        count=len(overrides),
+    )
+    return {"overrides": overrides}
+
+
 @router.put(
     "/grow-recipes/{recipe_id}/day-overrides",
     response_model_by_alias=True,
