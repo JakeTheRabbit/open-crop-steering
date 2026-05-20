@@ -17,4 +17,16 @@ export const queryKeys = {
   noTouchWindows: ["no-touch-windows"] as const,
   rooms: ["admin", "rooms"] as const,
   haRegistry: ["admin", "ha-registry"] as const,
+  // --- Convex-aligned facility tier ---
+  buildings: ["admin", "buildings"] as const,
+  convexRooms: (buildingId?: string) =>
+    ["admin", "convex-rooms", buildingId ?? "all"] as const,
+  locations: (roomId?: string) =>
+    ["admin", "locations", roomId ?? "all"] as const,
+  // Scope sensor / equipment lists by the filters we actually use so
+  // a roomId-keyed invalidation stays surgical.
+  sensorsByRoom: (roomId: string) =>
+    ["admin", "sensors", { roomId }] as const,
+  equipmentByRoom: (roomId: string) =>
+    ["admin", "equipment", { roomId }] as const,
 };

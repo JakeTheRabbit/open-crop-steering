@@ -32,12 +32,30 @@ _FAKE_ORG = "open-crop-steering"
 _FIXED_NOW = dt.datetime(2026, 5, 20, 12, 0, tzinfo=dt.UTC)
 
 
+class _FakeScalars:
+    """Stand-in for SQLAlchemy's :class:`ScalarResult`.
+
+    Implements just the subset the routers exercise: iteration (for
+    list endpoints) and ``.first()`` (for the lazy HA-integration
+    resolver lookup).
+    """
+
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = list(rows)
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._rows)
+
+    def first(self) -> object | None:
+        return self._rows[0] if self._rows else None
+
+
 class _FakeResult:
     def __init__(self, rows: list[object]) -> None:
         self._rows = list(rows)
 
-    def scalars(self) -> list[object]:
-        return list(self._rows)
+    def scalars(self) -> _FakeScalars:
+        return _FakeScalars(list(self._rows))
 
 
 class _FakeSession:
@@ -202,6 +220,72 @@ class TestSensors:
         async with await _client(session) as client:
             resp = await client.get("/api/sensors/nope")
         assert resp.status_code == 404
+
+    async def test_external_id_query_filter(self) -> None:
+        """The entity picker uses ``?externalId=...`` to check for duplicates."""
+        a = Sensor(
+            id="sensor-a",
+            org_id=_FAKE_ORG,
+            name="A",
+            code="a",
+            type="temperature",
+            data_unit="°C",
+            status="active",
+            is_active=True,
+            external_id="sensor.f2_back_left_temp",
+            created_at=_FIXED_NOW,
+            updated_at=_FIXED_NOW,
+        )
+        b = Sensor(
+            id="sensor-b",
+            org_id=_FAKE_ORG,
+            name="B",
+            code="b",
+            type="temperature",
+            data_unit="°C",
+            status="active",
+            is_active=True,
+            external_id="sensor.f2_front_right_temp",
+            created_at=_FIXED_NOW,
+            updated_at=_FIXED_NOW,
+        )
+        session = _FakeSession(prefilled=[a, b])
+        # The fake _FakeSession does not honour SQLAlchemy WHERE clauses
+        # (it returns every row of the queried entity type), so this
+        # asserts only that the endpoint accepts the parameter cleanly —
+        # the WHERE-clause shape itself is covered by integration tests
+        # against real Postgres.
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/sensors", params={"externalId": "sensor.f2_back_left_temp"}
+            )
+        assert resp.status_code == 200
+        assert "sensors" in resp.json()
+
+    async def test_lazy_create_ha_integration_on_external_id(self) -> None:
+        """Posting a sensor with ``externalId`` but no ``integrationId``
+        lazy-creates the singleton HA integration row and attaches the
+        sensor to it.
+        """
+        session = _FakeSession()
+        payload = {
+            **_sensor_payload(),
+            "externalId": "sensor.f2_scd41_back_left_temperature",
+        }
+        async with await _client(session) as client:
+            resp = await client.post("/api/sensors", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["integrationId"] is not None
+        # The HA integration row was created as a side effect.
+        integrations = [
+            r
+            for (t, _), r in session.store.items()
+            if t is SensorIntegration
+        ]
+        assert len(integrations) == 1
+        assert integrations[0].type == "home_assistant"
+        assert body["integrationId"] == integrations[0].id
 
 
 class TestSensorReadings:

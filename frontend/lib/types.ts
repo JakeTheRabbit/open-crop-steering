@@ -467,3 +467,332 @@ export interface RoomUpsertBody {
 export interface RoomDeleteResponse {
   deleted: string;
 }
+
+// --- Convex-aligned sites / sensors / equipment -----------------------
+//
+// Source of truth: the FastAPI Pydantic schemas under
+// `backend/app/schemas/{sites,sensors,equipment}.py`. Wire format is
+// camelCase, timestamps are epoch milliseconds. These shapes are
+// added alongside (not in place of) the legacy `Room` /
+// `RoomEquipmentMap` types above so consumers can be migrated one at
+// a time.
+
+/** Convex-aligned `buildings` row; `BuildingRead` (camelCase wire). */
+export interface Building {
+  id: string;
+  orgId: string;
+  name: string;
+  address: string | null;
+  stories: string[] | null;
+  width: number | null;
+  height: number | null;
+  length: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface BuildingsResponse {
+  buildings: Building[];
+}
+
+/** Payload for creating / updating a building. */
+export interface BuildingUpsertBody {
+  name: string;
+  address?: string | null;
+  stories?: string[] | null;
+  width?: number | null;
+  height?: number | null;
+  length?: number | null;
+}
+
+/** Convex-aligned `rooms` row — distinct from the legacy {@link Room}. */
+export interface ConvexRoom {
+  id: string;
+  orgId: string;
+  buildingId: string;
+  name: string;
+  purpose: string | null;
+  story: string | null;
+  positionX: number | null;
+  positionY: number | null;
+  width: number | null;
+  height: number | null;
+  length: number | null;
+  area: number | null;
+  type: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ConvexRoomsResponse {
+  rooms: ConvexRoom[];
+}
+
+/** Payload for creating / updating a Convex-aligned room. */
+export interface ConvexRoomUpsertBody {
+  buildingId: string;
+  name: string;
+  purpose?: string | null;
+  story?: string | null;
+  positionX?: number | null;
+  positionY?: number | null;
+  width?: number | null;
+  height?: number | null;
+  length?: number | null;
+  area?: number | null;
+  type?: string | null;
+}
+
+/** Convex-aligned `locations` row. */
+export interface Location {
+  id: string;
+  orgId: string;
+  roomId: string;
+  label: string;
+  path: string | null;
+  capacity: number | null;
+  story: string | null;
+  positionX: number | null;
+  positionY: number | null;
+  width: number | null;
+  height: number | null;
+  length: number | null;
+  area: number | null;
+  type: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface LocationsResponse {
+  locations: Location[];
+}
+
+export interface LocationUpsertBody {
+  roomId: string;
+  label: string;
+  path?: string | null;
+  capacity?: number | null;
+  story?: string | null;
+  positionX?: number | null;
+  positionY?: number | null;
+  width?: number | null;
+  height?: number | null;
+  length?: number | null;
+  area?: number | null;
+  type?: string | null;
+}
+
+/** The Convex `sensors.type` literal union — 13 entries. */
+export type SensorType =
+  | "temperature"
+  | "humidity"
+  | "co2"
+  | "ph"
+  | "ec"
+  | "vpd"
+  | "light"
+  | "pressure"
+  | "moisture"
+  | "flow"
+  | "level"
+  | "motion"
+  | "air_quality";
+
+export type SensorStatus =
+  | "active"
+  | "inactive"
+  | "maintenance"
+  | "error"
+  | "calibrating";
+
+/** Convex-aligned `sensors` row. */
+export interface Sensor {
+  id: string;
+  orgId: string;
+  name: string;
+  code: string;
+  type: SensorType;
+  roomId: string | null;
+  locationId: string | null;
+  batchId: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  serialNumber: string | null;
+  dataUnit: string;
+  minValue: number | null;
+  maxValue: number | null;
+  accuracy: number | null;
+  resolution: number | null;
+  integrationId: string | null;
+  externalId: string | null;
+  pollInterval: number | null;
+  status: SensorStatus;
+  lastReadingTime: number | null;
+  lastReadingValue: number | null;
+  batteryLevel: number | null;
+  signalStrength: number | null;
+  lastCalibration: number | null;
+  nextCalibration: number | null;
+  calibrationOffset: number | null;
+  calibrationNotes: string | null;
+  alerts: unknown[] | null;
+  notes: string | null;
+  tags: string[] | null;
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SensorsResponse {
+  sensors: Sensor[];
+}
+
+/**
+ * Payload for creating / updating a {@link Sensor}.
+ *
+ * The backend lazy-resolves `integrationId` when it is omitted but
+ * `externalId` is set (the single per-install Home Assistant
+ * integration). Other fields default to their respective `null` /
+ * `undefined` per the Pydantic schema.
+ */
+export interface SensorUpsertBody {
+  name: string;
+  code: string;
+  type: SensorType;
+  dataUnit: string;
+  status: SensorStatus;
+  isActive: boolean;
+  roomId?: string | null;
+  locationId?: string | null;
+  batchId?: string | null;
+  manufacturer?: string | null;
+  model?: string | null;
+  serialNumber?: string | null;
+  minValue?: number | null;
+  maxValue?: number | null;
+  accuracy?: number | null;
+  resolution?: number | null;
+  integrationId?: string | null;
+  externalId?: string | null;
+  pollInterval?: number | null;
+  lastReadingTime?: number | null;
+  lastReadingValue?: number | null;
+  batteryLevel?: number | null;
+  signalStrength?: number | null;
+  lastCalibration?: number | null;
+  nextCalibration?: number | null;
+  calibrationOffset?: number | null;
+  calibrationNotes?: string | null;
+  alerts?: unknown[] | null;
+  notes?: string | null;
+  tags?: string[] | null;
+}
+
+/** Convex-aligned `equipment.type` literal union. */
+export type EquipmentType =
+  | "hvac"
+  | "lighting"
+  | "irrigation"
+  | "extraction"
+  | "processing"
+  | "monitoring"
+  | "other";
+
+export type EquipmentStatus =
+  | "operational"
+  | "maintenance"
+  | "repair"
+  | "retired";
+
+/** Convex-aligned `equipment` row. */
+export interface Equipment {
+  id: string;
+  orgId: string;
+  name: string;
+  code: string;
+  type: EquipmentType;
+  manufacturer: string | null;
+  model: string | null;
+  serialNumber: string | null;
+  purchaseDate: number | null;
+  warrantyExpires: number | null;
+  roomId: string | null;
+  locationId: string | null;
+  integrationId: string | null;
+  externalId: string | null;
+  status: EquipmentStatus;
+  lastMaintenance: number | null;
+  nextMaintenance: number | null;
+  maintenanceInterval: number | null;
+  maintenanceNotes: string | null;
+  notes: string | null;
+  tags: string[] | null;
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface EquipmentResponse {
+  equipment: Equipment[];
+}
+
+export interface EquipmentUpsertBody {
+  name: string;
+  code: string;
+  type: EquipmentType;
+  status: EquipmentStatus;
+  isActive: boolean;
+  manufacturer?: string | null;
+  model?: string | null;
+  serialNumber?: string | null;
+  purchaseDate?: number | null;
+  warrantyExpires?: number | null;
+  roomId?: string | null;
+  locationId?: string | null;
+  integrationId?: string | null;
+  externalId?: string | null;
+  lastMaintenance?: number | null;
+  nextMaintenance?: number | null;
+  maintenanceInterval?: number | null;
+  maintenanceNotes?: string | null;
+  notes?: string | null;
+  tags?: string[] | null;
+}
+
+/** Convex-aligned `sensorIntegrations` row (subset OCS uses). */
+export interface SensorIntegration {
+  id: string;
+  orgId: string;
+  name: string;
+  type:
+    | "home_assistant"
+    | "arduino"
+    | "raspberry_pi"
+    | "mqtt"
+    | "http_webhook"
+    | "modbus"
+    | "custom";
+  connectionUrl: string | null;
+  apiKey: string | null;
+  username: string | null;
+  password: string | null;
+  mqttTopic: string | null;
+  status: "connected" | "disconnected" | "error" | "configuring";
+  lastConnected: number | null;
+  lastError: string | null;
+  syncEnabled: boolean;
+  syncInterval: number;
+  lastSync: number | null;
+  notes: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SensorIntegrationsResponse {
+  sensorIntegrations: SensorIntegration[];
+}
+
+/** Generic `{deleted: id}` envelope returned by every DELETE handler. */
+export interface DeleteResponse {
+  deleted: string;
+}

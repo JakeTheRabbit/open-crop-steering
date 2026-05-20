@@ -25,7 +25,13 @@ from __future__ import annotations
 
 import datetime as dt
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_validator,
+)
 
 
 def _to_epoch_ms(value: dt.datetime) -> int:
@@ -342,15 +348,57 @@ class PhaseTask(BaseModel):
     )
 
 
+class PhaseTargetSpec(BaseModel):
+    """One ``(value, tolerance, unit)`` cell on a phase's flat target map.
+
+    Used as the value type of :attr:`GrowRecipePhase.targets`, the OCS
+    extension that lets a phase declare per-parameter defaults using the
+    same flat ``param_name -> {value, tolerance, unit}`` shape that the
+    legacy :class:`RecipeRevisionParam` flow has always used. The shape
+    matches :class:`app.schemas.recipe_overrides.DayOverrideCreate`
+    exactly (minus the ``day``/``param_name`` keys, which are the map
+    address) so an override row is a literal per-day shadow of one
+    phase-default cell.
+
+    The structured Convex-aligned ``EnvironmentalTargets`` and
+    ``PhaseNutrients`` shapes also live on the phase; the two are
+    complementary, not mutually exclusive. ``targets`` exists because
+    the OCS preset library (e.g. ``cannabis_12week``) uses arbitrary
+    param names like ``temp_day``, ``rh_night``, ``ppfd``, ``co2_day``
+    that don't slot neatly into the Convex ``temperature/humidity/co2``
+    rangebands; phase + per-day overrides on the flat map preserve that
+    expressiveness.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    value: float
+    tolerance: float | None = None
+    unit: str | None = Field(default=None, max_length=32)
+
+
 class GrowRecipePhase(BaseModel):
-    """One phase in a grow recipe."""
+    """One phase in a grow recipe.
+
+    The Convex wire shape uses ``order + durationDays`` to define phase
+    boundaries; OCS keeps that shape verbatim for round-tripping. The
+    derived 1-based ``start_day`` / ``end_day`` boundaries are not
+    persisted — they are computed by the parent :class:`GrowRecipeBase`
+    model from the prefix-sum of ``duration_days`` in ``order`` and
+    re-attached to each phase so callers (resolver, validator, planner
+    UI) can read ``phase.start_day`` / ``phase.end_day`` directly.
+
+    Until the parent recipe attaches them, ``start_day`` and ``end_day``
+    are ``None``; this is just a transport state — a phase fetched
+    through :class:`GrowRecipeBase` always has them populated.
+    """
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     phase_name: str = Field(
         min_length=1, max_length=128, alias="phaseName"
     )
-    duration_days: float = Field(alias="durationDays")
+    duration_days: float = Field(alias="durationDays", gt=0)
     order: float
     light_cycle: LightCycle | None = Field(default=None, alias="lightCycle")
     environmental_targets: EnvironmentalTargets | None = Field(
@@ -360,10 +408,31 @@ class GrowRecipePhase(BaseModel):
     phase_tasks: list[PhaseTask] | None = Field(
         default=None, alias="phaseTasks"
     )
+    # OCS extension — see :class:`PhaseTargetSpec`.
+    targets: dict[str, PhaseTargetSpec] | None = None
+
+    # Derived boundaries, populated by the parent recipe's validator —
+    # see :meth:`GrowRecipeBase._populate_phase_day_boundaries`. Kept on
+    # the wire (camelCase ``startDay`` / ``endDay``) so the planner UI
+    # can render them without re-computing.
+    start_day: int | None = Field(default=None, alias="startDay", ge=1)
+    end_day: int | None = Field(default=None, alias="endDay", ge=1)
 
 
 class GrowRecipeBase(BaseModel):
-    """Fields shared by the create and read shapes of a grow recipe."""
+    """Fields shared by the create and read shapes of a grow recipe.
+
+    The post-validate hook :meth:`_populate_phase_day_boundaries`
+    materialises a 1-based ``start_day`` / ``end_day`` on every phase
+    from the prefix-sum of ``duration_days`` in ``order``. The check
+    that phases are *strictly contiguous* with no gap or overlap (and
+    that the first phase starts at day 1) lives in
+    :func:`app.core.recipe_resolver.validate_recipe` so the wizard can
+    surface every finding at once rather than failing fast on the
+    first; the validator here only fires for the constraints the
+    Pydantic layer absolutely needs to enforce (well-formed structure,
+    unique ``order`` values).
+    """
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -375,13 +444,76 @@ class GrowRecipeBase(BaseModel):
     estimated_total_duration_days: float | None = Field(
         default=None, alias="estimatedTotalDurationDays"
     )
-    phases: list[GrowRecipePhase]
+    phases: list[GrowRecipePhase] = Field(min_length=1)
     created_by: str | None = Field(
         default=None, max_length=64, alias="createdBy"
     )
     last_modified_by: str | None = Field(
         default=None, max_length=64, alias="lastModifiedBy"
     )
+
+    @model_validator(mode="after")
+    def _populate_phase_day_boundaries(self) -> GrowRecipeBase:
+        """Stamp 1-based ``start_day`` / ``end_day`` on every phase.
+
+        Sorts a shallow copy by ``order``, then walks the list assigning
+        ``start_day = cursor`` and ``end_day = cursor + duration_days -
+        1`` to each phase. The phases list is reassigned in
+        ``order``-sorted shape so the resolver can rely on it without
+        re-sorting on every read.
+
+        Also enforces:
+
+        * Unique ``order`` values — a duplicate is a structural error
+          the wizard never accepts.
+        * Integer-valued ``duration_days`` (per-day overrides only make
+          sense at integer boundaries).
+
+        Cross-phase contiguity (no gap, no overlap, last phase ends at
+        the implied cycle day count) is checked separately in
+        :func:`app.core.recipe_resolver.validate_recipe`; that lets the
+        caller collect every finding rather than fail on the first.
+        """
+        ordered = sorted(self.phases, key=lambda p: p.order)
+
+        seen_orders: set[float] = set()
+        for phase in ordered:
+            if phase.order in seen_orders:
+                raise ValueError(
+                    f"duplicate phase order {phase.order!r} — every phase "
+                    "must have a distinct ``order`` value"
+                )
+            seen_orders.add(phase.order)
+            if phase.duration_days != int(phase.duration_days):
+                raise ValueError(
+                    f"phase {phase.phase_name!r} has fractional "
+                    f"duration_days={phase.duration_days!r}; per-day "
+                    "overrides require integer-day phase lengths"
+                )
+
+        cursor = 1
+        for phase in ordered:
+            length = int(phase.duration_days)
+            phase.start_day = cursor
+            phase.end_day = cursor + length - 1
+            cursor += length
+
+        self.phases = ordered
+        return self
+
+    @property
+    def cycle_day_count(self) -> int:
+        """Total cycle length in days — sum of phase durations.
+
+        Kept as a plain ``@property`` (rather than a Pydantic
+        ``@computed_field``) so it does not appear in
+        ``model_dump`` output — that lets ``GrowRecipeCreate.model_dump
+        (by_alias=False)`` keep round-tripping through the SQLAlchemy
+        constructor without rejecting an unknown kwarg. Endpoints that
+        want to surface ``cycleDayCount`` on the wire add it
+        explicitly into their response dict.
+        """
+        return sum(int(p.duration_days) for p in self.phases)
 
 
 class GrowRecipeCreate(GrowRecipeBase):

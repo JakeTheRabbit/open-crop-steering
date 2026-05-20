@@ -1,161 +1,291 @@
 "use client";
 
 import * as React from "react";
-import { Plus, Trash2 } from "lucide-react";
 
 import type {
+  Equipment,
+  EquipmentType,
   HaArea,
   HaEntity,
-  RoomEquipmentMap,
-  RoomTank,
-  RoomZone,
+  Sensor,
+  SensorType,
 } from "@/lib/types";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  EntityPicker,
-  MultiEntityPicker,
-} from "@/components/admin/entity-picker";
+  type EquipmentRoleSpec,
+  type RoleSpec,
+  type SensorRoleSpec,
+  SensorRolePicker,
+} from "@/components/admin/sensor-role-picker";
 
 /**
- * The per-room equipment-map editor.
+ * The per-room equipment editor — pass-5b rewrite.
  *
- * Renders the control-enable toggles, a {@link MultiEntityPicker} for
- * every sensor and actuator role (a room has several temp probes, AC
- * units, light circuits, …), a single {@link EntityPicker} for the
- * cooling-headroom source, and dynamic add/remove lists for irrigation
- * zones and nutrient tanks. The component is fully controlled: the
- * parent owns the `RoomEquipmentMap` draft and an `onChange` patcher.
+ * Pre-pass-5b this component owned a `RoomEquipmentMap` draft that
+ * the page PUT back to `/api/rooms/{room_id}`. Pass 5b retired that
+ * JSONB hack: each picked HA entity is now a first-class
+ * {@link Sensor} or {@link Equipment} row keyed by `roomId`. The
+ * editor renders one {@link SensorRolePicker} per role, grouping
+ * the existing records by Convex `type` and the per-role tag the
+ * picker emits.
+ *
+ * The component is purely presentational — it does not own a draft
+ * and does not call the API directly. The {@link SensorRolePicker}
+ * inside each row handles its own POST / DELETE / cache
+ * invalidation, so the parent's job is just to slice the data and
+ * render.
  */
 
-/** The single-entity role field of a {@link RoomEquipmentMap}. */
-type ScalarRoleKey = "cooling_capacity_entity";
+/** Convex `sensors.type` + tag, the latter folded into the new record's `notes`. */
+type SensorRole = {
+  kind: "sensor";
+  /** UI key for the role; not persisted directly. */
+  id: string;
+  label: string;
+  spec: SensorRoleSpec;
+};
 
-/** A multi-entity sensor role field of a {@link RoomEquipmentMap}. */
-type SensorRoleKey =
-  | "temp_sensors"
-  | "rh_sensors"
-  | "co2_sensors"
-  | "leaf_temp_sensors"
-  | "under_canopy_rh_probes"
-  | "vwc_sensors"
-  | "ec_sensors"
-  | "ppfd_sensors"
-  | "dli_sensors"
-  | "pm1_sensors"
-  | "pm25_sensors"
-  | "pm4_sensors"
-  | "pm10_sensors";
+type EquipmentRole = {
+  kind: "equipment";
+  id: string;
+  label: string;
+  spec: EquipmentRoleSpec;
+};
 
-/** A multi-entity actuator role field of a {@link RoomEquipmentMap}. */
-type ActuatorRoleKey =
-  | "light_entities"
-  | "ac_entities"
-  | "dehumidifier_entities"
-  | "reheat_entities"
-  | "exhaust_entities"
-  | "co2_solenoid_entities";
+type RoleDef = SensorRole | EquipmentRole;
 
-/** A multi-entity room-level irrigation-supply role field. */
-type IrrigationSupplyKey =
-  | "irrigation_pump_entities"
-  | "mainline_valve_entities";
-
-/** Any multi-entity (list) role field of a {@link RoomEquipmentMap}. */
-type MultiRoleKey = SensorRoleKey | ActuatorRoleKey | IrrigationSupplyKey;
-
-/** A per-zone multi-entity field of a {@link RoomZone}. */
-type ZoneFieldKey = "valve_entities" | "vwc_sensors" | "ec_sensors";
-
-/** A control-enable boolean of a {@link RoomEquipmentMap}. */
-type ToggleKey =
-  | "env_control_enabled"
-  | "ppfd_control_enabled"
-  | "irrigation_control_enabled"
-  | "tank_control_enabled"
-  | "co2_control_enabled";
-
-const TOGGLES: { key: ToggleKey; label: string; hint: string }[] = [
+const ENV_SENSORS: SensorRole[] = [
   {
-    key: "env_control_enabled",
-    label: "Environment control",
-    hint: "Temp / RH / VPD steering",
+    kind: "sensor",
+    id: "temp_sensors",
+    label: "Air temperature",
+    spec: {
+      kind: "sensor",
+      type: "temperature",
+      roleLabel: "air temperature",
+      dataUnit: "°C",
+    },
   },
   {
-    key: "ppfd_control_enabled",
-    label: "PPFD control",
-    hint: "Lighting intensity steering",
+    kind: "sensor",
+    id: "rh_sensors",
+    label: "Relative humidity",
+    spec: {
+      kind: "sensor",
+      type: "humidity",
+      roleLabel: "relative humidity",
+      dataUnit: "%",
+    },
   },
   {
-    key: "irrigation_control_enabled",
-    label: "Irrigation control",
-    hint: "Zone valve / pump steering",
+    kind: "sensor",
+    id: "co2_sensors",
+    label: "CO2",
+    spec: {
+      kind: "sensor",
+      type: "co2",
+      roleLabel: "CO2",
+      dataUnit: "ppm",
+    },
   },
   {
-    key: "tank_control_enabled",
-    label: "Tank control",
-    hint: "Nutrient tank pH / EC dosing",
+    kind: "sensor",
+    id: "leaf_temp_sensors",
+    label: "Leaf temperature",
+    spec: {
+      kind: "sensor",
+      type: "temperature",
+      roleLabel: "leaf temperature",
+      dataUnit: "°C",
+    },
   },
   {
-    key: "co2_control_enabled",
-    label: "CO2 control",
-    hint: "CO2 solenoid steering",
+    kind: "sensor",
+    id: "under_canopy_rh_probes",
+    label: "Under-canopy RH probe",
+    spec: {
+      kind: "sensor",
+      type: "humidity",
+      roleLabel: "under-canopy RH probe",
+      dataUnit: "%",
+    },
   },
 ];
 
-/** Environment sensor roles — multiple entities each. */
-const ENV_SENSOR_FIELDS: { key: SensorRoleKey; label: string }[] = [
-  { key: "temp_sensors", label: "Air temperature" },
-  { key: "rh_sensors", label: "Relative humidity" },
-  { key: "co2_sensors", label: "CO2" },
-  { key: "leaf_temp_sensors", label: "Leaf temperature" },
-  { key: "under_canopy_rh_probes", label: "Under-canopy RH probe" },
+const SUBSTRATE_LIGHT_SENSORS: SensorRole[] = [
+  {
+    kind: "sensor",
+    id: "vwc_sensors",
+    label: "Substrate VWC",
+    spec: {
+      kind: "sensor",
+      type: "moisture",
+      roleLabel: "substrate VWC",
+      dataUnit: "%",
+    },
+  },
+  {
+    kind: "sensor",
+    id: "ec_sensors",
+    label: "Substrate EC (pwEC)",
+    spec: {
+      kind: "sensor",
+      type: "ec",
+      roleLabel: "substrate EC",
+      dataUnit: "mS/cm",
+    },
+  },
+  {
+    kind: "sensor",
+    id: "ppfd_sensors",
+    label: "PPFD",
+    spec: {
+      kind: "sensor",
+      type: "light",
+      roleLabel: "PPFD",
+      dataUnit: "µmol/m²/s",
+    },
+  },
+  {
+    kind: "sensor",
+    id: "dli_sensors",
+    label: "DLI",
+    spec: {
+      kind: "sensor",
+      type: "light",
+      roleLabel: "DLI",
+      dataUnit: "mol/m²/day",
+    },
+  },
 ];
 
-/** Substrate + light sensor roles — multiple entities each. */
-const SUBSTRATE_LIGHT_SENSOR_FIELDS: { key: SensorRoleKey; label: string }[] = [
-  { key: "vwc_sensors", label: "Substrate VWC" },
-  { key: "ec_sensors", label: "Substrate EC (pwEC)" },
-  { key: "ppfd_sensors", label: "PPFD" },
-  { key: "dli_sensors", label: "DLI" },
+const AIR_QUALITY_SENSORS: SensorRole[] = [
+  {
+    kind: "sensor",
+    id: "pm1_sensors",
+    label: "PM1.0",
+    spec: {
+      kind: "sensor",
+      type: "air_quality",
+      roleLabel: "PM1.0",
+      dataUnit: "µg/m³",
+    },
+  },
+  {
+    kind: "sensor",
+    id: "pm25_sensors",
+    label: "PM2.5",
+    spec: {
+      kind: "sensor",
+      type: "air_quality",
+      roleLabel: "PM2.5",
+      dataUnit: "µg/m³",
+    },
+  },
+  {
+    kind: "sensor",
+    id: "pm4_sensors",
+    label: "PM4.0",
+    spec: {
+      kind: "sensor",
+      type: "air_quality",
+      roleLabel: "PM4.0",
+      dataUnit: "µg/m³",
+    },
+  },
+  {
+    kind: "sensor",
+    id: "pm10_sensors",
+    label: "PM10",
+    spec: {
+      kind: "sensor",
+      type: "air_quality",
+      roleLabel: "PM10",
+      dataUnit: "µg/m³",
+    },
+  },
 ];
 
-/** Air-quality sensor roles — particulate matter, multiple entities each. */
-const AIR_QUALITY_SENSOR_FIELDS: { key: SensorRoleKey; label: string }[] = [
-  { key: "pm1_sensors", label: "PM1.0" },
-  { key: "pm25_sensors", label: "PM2.5" },
-  { key: "pm4_sensors", label: "PM4.0" },
-  { key: "pm10_sensors", label: "PM10" },
+const ACTUATORS: EquipmentRole[] = [
+  {
+    kind: "equipment",
+    id: "light_entities",
+    label: "Grow lights",
+    spec: { kind: "equipment", type: "lighting", roleLabel: "grow light" },
+  },
+  {
+    kind: "equipment",
+    id: "ac_entities",
+    label: "Air conditioners",
+    spec: { kind: "equipment", type: "hvac", roleLabel: "AC unit" },
+  },
+  {
+    kind: "equipment",
+    id: "dehumidifier_entities",
+    label: "Dehumidifiers",
+    spec: { kind: "equipment", type: "hvac", roleLabel: "dehumidifier" },
+  },
+  {
+    kind: "equipment",
+    id: "reheat_entities",
+    label: "Reheat",
+    spec: { kind: "equipment", type: "hvac", roleLabel: "reheat coil" },
+  },
+  {
+    kind: "equipment",
+    id: "exhaust_entities",
+    label: "Exhaust fans",
+    spec: { kind: "equipment", type: "hvac", roleLabel: "exhaust fan" },
+  },
+  {
+    kind: "equipment",
+    id: "co2_solenoid_entities",
+    label: "CO2 solenoids",
+    spec: { kind: "equipment", type: "hvac", roleLabel: "CO2 solenoid" },
+  },
 ];
 
-/** Multi-entity actuator role fields — several entities each. */
-const ACTUATOR_FIELDS: { key: ActuatorRoleKey; label: string }[] = [
-  { key: "light_entities", label: "Grow lights" },
-  { key: "ac_entities", label: "Air conditioners" },
-  { key: "dehumidifier_entities", label: "Dehumidifiers" },
-  { key: "reheat_entities", label: "Reheat" },
-  { key: "exhaust_entities", label: "Exhaust fans" },
-  { key: "co2_solenoid_entities", label: "CO2 solenoids" },
+const IRRIGATION_SUPPLY: EquipmentRole[] = [
+  {
+    kind: "equipment",
+    id: "irrigation_pump_entities",
+    label: "Irrigation pump",
+    spec: {
+      kind: "equipment",
+      type: "irrigation",
+      roleLabel: "irrigation pump",
+    },
+  },
+  {
+    kind: "equipment",
+    id: "mainline_valve_entities",
+    label: "Mainline / manifold valves",
+    spec: {
+      kind: "equipment",
+      type: "irrigation",
+      roleLabel: "mainline valve",
+    },
+  },
 ];
 
-/** Room-level irrigation-supply role fields — open for every shot. */
-const IRRIGATION_SUPPLY_FIELDS: { key: IrrigationSupplyKey; label: string }[] =
-  [
-    { key: "irrigation_pump_entities", label: "Irrigation pump" },
-    { key: "mainline_valve_entities", label: "Mainline / manifold valves" },
-  ];
-
-/** Per-zone multi-entity role fields. */
-const ZONE_FIELDS: { key: ZoneFieldKey; label: string }[] = [
-  { key: "valve_entities", label: "Zone valve(s)" },
-  { key: "vwc_sensors", label: "Substrate VWC" },
-  { key: "ec_sensors", label: "Substrate EC (pwEC)" },
-];
+const COOLING_CAPACITY: EquipmentRole = {
+  kind: "equipment",
+  id: "cooling_capacity_entity",
+  label: "Cooling-capacity source",
+  spec: {
+    kind: "equipment",
+    type: "monitoring",
+    roleLabel: "cooling capacity source",
+  },
+};
 
 export interface RoomEquipmentFormProps {
-  value: RoomEquipmentMap;
-  onChange: (next: RoomEquipmentMap) => void;
+  /** The Convex `rooms.id` every record is scoped to. */
+  roomId: string;
+  /** Every sensor record already FK'd to `roomId`. */
+  sensors: ReadonlyArray<Sensor>;
+  /** Every equipment record already FK'd to `roomId`. */
+  equipment: ReadonlyArray<Equipment>;
   entities: HaEntity[];
   areas: HaArea[];
   entityById: Map<string, HaEntity>;
@@ -173,176 +303,146 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Slice the records list for one role.
+ *
+ * Sensor records of the same Convex `type` cover multiple roles
+ * (e.g. `"humidity"` is both `rh_sensors` and `under_canopy_rh_probes`).
+ * They are disambiguated by the `notes` tag the picker writes on
+ * create — anything not matching the role's tag stays in the catch-all
+ * primary role for that type.
+ */
+function recordsForRole<T extends Sensor | Equipment>(
+  all: ReadonlyArray<T>,
+  role: RoleDef,
+  catchAllByType: Map<string, RoleDef>,
+): T[] {
+  const tag = role.spec.roleLabel;
+  return all.filter((r) => {
+    if (r.type !== role.spec.type) return false;
+    const recordTag = r.notes ?? "";
+    // The role that owns the type as its catch-all collects anything
+    // whose notes don't pin it to a sibling role.
+    const isCatchAll = catchAllByType.get(role.spec.type)?.id === role.id;
+    if (isCatchAll) {
+      // Drop records that point at a known sibling role.
+      for (const candidate of catchAllByType.values()) {
+        if (
+          candidate.id !== role.id &&
+          candidate.spec.type === role.spec.type &&
+          recordTag === candidate.spec.roleLabel
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return recordTag === tag;
+  });
+}
+
+/**
+ * Build the type → primary-role index used to split records with
+ * the same Convex `type` across multiple UI roles. The first role
+ * declared for a given type wins.
+ */
+function buildPrimaryRoleIndex(roles: RoleDef[]): Map<string, RoleDef> {
+  const seen = new Map<string, RoleDef>();
+  for (const r of roles) {
+    if (!seen.has(r.spec.type)) seen.set(r.spec.type, r);
+  }
+  return seen;
+}
+
 export function RoomEquipmentForm({
-  value,
-  onChange,
+  roomId,
+  sensors,
+  equipment,
   entities,
   areas,
   entityById,
   defaultAreaId,
   disabled = false,
 }: RoomEquipmentFormProps) {
-  const patch = (p: Partial<RoomEquipmentMap>) =>
-    onChange({ ...value, ...p });
-
-  // --- zones ----------------------------------------------------------
-  const addZone = () => {
-    const next: RoomZone = {
-      zone_id: `zone${value.zones.length + 1}`,
-      valve_entities: [],
-      vwc_sensors: [],
-      ec_sensors: [],
-    };
-    patch({ zones: [...value.zones, next] });
-  };
-  const updateZone = (i: number, p: Partial<RoomZone>) =>
-    patch({
-      zones: value.zones.map((z, idx) => (idx === i ? { ...z, ...p } : z)),
-    });
-  const removeZone = (i: number) =>
-    patch({ zones: value.zones.filter((_, idx) => idx !== i) });
-
-  // --- tanks ----------------------------------------------------------
-  const addTank = () => {
-    const next: RoomTank = {
-      tank_id: `tank${value.tanks.length + 1}`,
-      ph_sensor: null,
-      ec_sensor: null,
-      doser_entities: [],
-    };
-    patch({ tanks: [...value.tanks, next] });
-  };
-  const updateTank = (i: number, p: Partial<RoomTank>) =>
-    patch({
-      tanks: value.tanks.map((t, idx) => (idx === i ? { ...t, ...p } : t)),
-    });
-  const removeTank = (i: number) =>
-    patch({ tanks: value.tanks.filter((_, idx) => idx !== i) });
-  const addDoser = (i: number) => {
-    const tank = value.tanks[i];
-    if (!tank) return;
-    updateTank(i, { doser_entities: [...tank.doser_entities, ""] });
-  };
-  const updateDoser = (ti: number, di: number, entityId: string | null) => {
-    const tank = value.tanks[ti];
-    if (!tank) return;
-    updateTank(ti, {
-      doser_entities: tank.doser_entities.map((d, idx) =>
-        idx === di ? entityId ?? "" : d,
-      ),
-    });
-  };
-  const removeDoser = (ti: number, di: number) => {
-    const tank = value.tanks[ti];
-    if (!tank) return;
-    updateTank(ti, {
-      doser_entities: tank.doser_entities.filter((_, idx) => idx !== di),
-    });
-  };
-
-  /** A labelled single-entity picker row. */
-  const pickerRow = (key: ScalarRoleKey, label: string) => (
-    <div key={key}>
-      <label className="mb-1 block text-xs text-muted-foreground">
-        {label}
-      </label>
-      <EntityPicker
-        value={value[key]}
-        onChange={(id) => patch({ [key]: id } as Partial<RoomEquipmentMap>)}
-        entities={entities}
-        areas={areas}
-        entityById={entityById}
-        defaultAreaId={defaultAreaId}
-        disabled={disabled}
-        data-testid={`picker-${key}`}
-      />
-    </div>
+  const allSensorRoles: SensorRole[] = React.useMemo(
+    () => [...ENV_SENSORS, ...SUBSTRATE_LIGHT_SENSORS, ...AIR_QUALITY_SENSORS],
+    [],
+  );
+  const allEquipmentRoles: EquipmentRole[] = React.useMemo(
+    () => [...ACTUATORS, ...IRRIGATION_SUPPLY, COOLING_CAPACITY],
+    [],
   );
 
-  /** A labelled multi-entity picker row (actuators). */
-  const multiPickerRow = (key: MultiRoleKey, label: string) => (
-    <div key={key}>
-      <label className="mb-1 block text-xs text-muted-foreground">
-        {label}
-      </label>
-      <MultiEntityPicker
-        values={value[key]}
-        onChange={(ids) =>
-          patch({ [key]: ids } as Partial<RoomEquipmentMap>)
-        }
-        entities={entities}
-        areas={areas}
-        entityById={entityById}
-        defaultAreaId={defaultAreaId}
-        disabled={disabled}
-      />
-    </div>
+  /** First-role-per-type index for the sensor side. */
+  const sensorTypePrimary = React.useMemo(
+    () => buildPrimaryRoleIndex(allSensorRoles),
+    [allSensorRoles],
+  );
+  /** First-role-per-type index for the equipment side. */
+  const equipmentTypePrimary = React.useMemo(
+    () => buildPrimaryRoleIndex(allEquipmentRoles),
+    [allEquipmentRoles],
+  );
+
+  const renderSensorRole = (role: SensorRole) => (
+    <SensorRolePicker
+      key={role.id}
+      roomId={roomId}
+      role={role.spec satisfies RoleSpec}
+      label={role.label}
+      records={recordsForRole(sensors, role, sensorTypePrimary)}
+      entities={entities}
+      areas={areas}
+      entityById={entityById}
+      defaultAreaId={defaultAreaId}
+      disabled={disabled}
+    />
+  );
+
+  const renderEquipmentRole = (role: EquipmentRole) => (
+    <SensorRolePicker
+      key={role.id}
+      roomId={roomId}
+      role={role.spec satisfies RoleSpec}
+      label={role.label}
+      records={recordsForRole(equipment, role, equipmentTypePrimary)}
+      entities={entities}
+      areas={areas}
+      entityById={entityById}
+      defaultAreaId={defaultAreaId}
+      disabled={disabled}
+    />
   );
 
   return (
-    <div className="space-y-4">
-      {/* control toggles */}
-      <Card>
-        <CardContent className="p-4">
-          <SectionLabel>Control modes</SectionLabel>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {TOGGLES.map((t) => (
-              <label
-                key={t.key}
-                className="flex items-start gap-2 rounded-md border border-border p-2.5 text-sm"
-              >
-                <input
-                  type="checkbox"
-                  checked={value[t.key]}
-                  disabled={disabled}
-                  onChange={(e) =>
-                    patch({ [t.key]: e.target.checked } as Partial<RoomEquipmentMap>)
-                  }
-                  className="mt-0.5 accent-[hsl(var(--primary))]"
-                />
-                <span>
-                  <span className="block font-medium">{t.label}</span>
-                  <span className="block text-2xs text-muted-foreground">
-                    {t.hint}
-                  </span>
-                </span>
-              </label>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* environment sensors — several entities each */}
+    <div className="space-y-4" data-testid="room-equipment-form">
       <Card>
         <CardContent className="p-4">
           <SectionLabel>Environment sensors</SectionLabel>
           <p className="mb-3 text-2xs text-muted-foreground">
-            Assign every probe of each type — a room usually has several
-            temp / RH / CO2 sensors at different canopy heights.
+            Each role takes multiple HA entities — a room usually has
+            several temp / RH / CO2 probes at different canopy heights.
+            Picking an entity creates a sensor record; removing one
+            deletes it.
           </p>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {ENV_SENSOR_FIELDS.map((f) => multiPickerRow(f.key, f.label))}
+            {ENV_SENSORS.map(renderSensorRole)}
           </div>
         </CardContent>
       </Card>
 
-      {/* substrate + light sensors */}
       <Card>
         <CardContent className="p-4">
           <SectionLabel>Substrate &amp; light sensors</SectionLabel>
           <p className="mb-3 text-2xs text-muted-foreground">
-            Substrate moisture / pore-water EC and canopy light — one
-            sensor per zone is typical, so add as many as you have.
+            Substrate moisture / pore-water EC and canopy light.
           </p>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {SUBSTRATE_LIGHT_SENSOR_FIELDS.map((f) =>
-              multiPickerRow(f.key, f.label),
-            )}
+            {SUBSTRATE_LIGHT_SENSORS.map(renderSensorRole)}
           </div>
         </CardContent>
       </Card>
 
-      {/* air-quality sensors */}
       <Card>
         <CardContent className="p-4">
           <SectionLabel>Air-quality sensors</SectionLabel>
@@ -350,14 +450,11 @@ export function RoomEquipmentForm({
             Particulate matter — PM1.0 / PM2.5 / PM4.0 / PM10.
           </p>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {AIR_QUALITY_SENSOR_FIELDS.map((f) =>
-              multiPickerRow(f.key, f.label),
-            )}
+            {AIR_QUALITY_SENSORS.map(renderSensorRole)}
           </div>
         </CardContent>
       </Card>
 
-      {/* actuators — several entities each */}
       <Card>
         <CardContent className="p-4">
           <SectionLabel>Actuators &amp; equipment</SectionLabel>
@@ -366,244 +463,35 @@ export function RoomEquipmentForm({
             AC units or grow-light circuits.
           </p>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {ACTUATOR_FIELDS.map((f) => multiPickerRow(f.key, f.label))}
+            {ACTUATORS.map(renderEquipmentRole)}
           </div>
           <div className="mt-3 grid grid-cols-1 gap-3 border-t border-border pt-3 lg:grid-cols-2">
-            {pickerRow("cooling_capacity_entity", "Cooling-capacity source")}
+            {renderEquipmentRole(COOLING_CAPACITY)}
           </div>
         </CardContent>
       </Card>
 
-      {/* irrigation — room-level supply + per-zone valves */}
       <Card>
         <CardContent className="p-4">
-          <SectionLabel>Irrigation</SectionLabel>
+          <SectionLabel>Irrigation supply</SectionLabel>
           <p className="mb-3 text-2xs text-muted-foreground">
-            A shot opens the shared pump and the mainline / manifold
-            valve(s) together with the target zone&apos;s own valve(s).
+            The pump(s) and mainline / manifold valve(s) that open for
+            every shot.
           </p>
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-            {IRRIGATION_SUPPLY_FIELDS.map((f) =>
-              multiPickerRow(f.key, f.label),
-            )}
+            {IRRIGATION_SUPPLY.map(renderEquipmentRole)}
           </div>
-
-          <div className="mb-2 mt-4 flex items-center justify-between border-t border-border pt-3">
-            <SectionLabel>Zones / rows</SectionLabel>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={disabled}
-              onClick={addZone}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add zone
-            </Button>
-          </div>
-          {value.zones.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              No zones. Add one per row / bench to assign its valve(s)
-              and substrate VWC / EC sensors.
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {value.zones.map((z, i) => (
-                <div
-                  key={i}
-                  className="rounded-md border border-border p-3"
-                  data-testid="zone-row"
-                >
-                  <div className="mb-2 flex items-center gap-2">
-                    <Input
-                      value={z.zone_id}
-                      disabled={disabled}
-                      onChange={(e) =>
-                        updateZone(i, { zone_id: e.target.value })
-                      }
-                      placeholder="zone id"
-                      className="h-8 max-w-[12rem] font-mono text-xs"
-                      aria-label={`Zone ${i + 1} id`}
-                    />
-                    <div className="flex-1" />
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      disabled={disabled}
-                      aria-label={`Remove zone ${z.zone_id}`}
-                      className="h-8 w-8"
-                      onClick={() => removeZone(i)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5 text-critical" />
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    {ZONE_FIELDS.map(({ key, label }) => (
-                      <div key={key}>
-                        <label className="mb-1 block text-xs text-muted-foreground">
-                          {label}
-                        </label>
-                        <MultiEntityPicker
-                          values={z[key]}
-                          onChange={(ids) =>
-                            updateZone(i, {
-                              [key]: ids,
-                            } as Partial<RoomZone>)
-                          }
-                          entities={entities}
-                          areas={areas}
-                          entityById={entityById}
-                          defaultAreaId={defaultAreaId}
-                          disabled={disabled}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* tanks */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <SectionLabel>Nutrient tanks</SectionLabel>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={disabled}
-              onClick={addTank}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add tank
-            </Button>
-          </div>
-          {value.tanks.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              No tanks. Add one to assign pH, EC and doser entities.
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {value.tanks.map((t, i) => (
-                <div
-                  key={i}
-                  className="rounded-md border border-border p-3"
-                  data-testid="tank-row"
-                >
-                  <div className="mb-2 flex items-center gap-2">
-                    <Input
-                      value={t.tank_id}
-                      disabled={disabled}
-                      onChange={(e) =>
-                        updateTank(i, { tank_id: e.target.value })
-                      }
-                      placeholder="tank id"
-                      className="h-8 max-w-[12rem] font-mono text-xs"
-                      aria-label={`Tank ${i + 1} id`}
-                    />
-                    <div className="flex-1" />
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      disabled={disabled}
-                      aria-label={`Remove tank ${t.tank_id}`}
-                      className="h-8 w-8"
-                      onClick={() => removeTank(i)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5 text-critical" />
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    {(
-                      [
-                        ["ph_sensor", "pH sensor"],
-                        ["ec_sensor", "EC sensor"],
-                      ] as const
-                    ).map(([key, label]) => (
-                      <div key={key}>
-                        <label className="mb-1 block text-xs text-muted-foreground">
-                          {label}
-                        </label>
-                        <EntityPicker
-                          value={t[key]}
-                          onChange={(id) => updateTank(i, { [key]: id })}
-                          entities={entities}
-                          areas={areas}
-                          entityById={entityById}
-                          defaultAreaId={defaultAreaId}
-                          disabled={disabled}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-3">
-                    <div className="mb-1 flex items-center justify-between">
-                      <label className="text-xs text-muted-foreground">
-                        Doser entities
-                      </label>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        disabled={disabled}
-                        className="h-7"
-                        onClick={() => addDoser(i)}
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        Add doser
-                      </Button>
-                    </div>
-                    {t.doser_entities.length === 0 ? (
-                      <p className="text-2xs text-muted-foreground">
-                        No dosers assigned.
-                      </p>
-                    ) : (
-                      <div className="space-y-2">
-                        {t.doser_entities.map((d, di) => (
-                          <div
-                            key={di}
-                            className="flex items-center gap-1"
-                          >
-                            <div className="flex-1">
-                              <EntityPicker
-                                value={d || null}
-                                onChange={(id) => updateDoser(i, di, id)}
-                                entities={entities}
-                                areas={areas}
-                                entityById={entityById}
-                                defaultAreaId={defaultAreaId}
-                                disabled={disabled}
-                                placeholder="Select a doser entity…"
-                              />
-                            </div>
-                            <Button
-                              type="button"
-                              size="icon"
-                              variant="ghost"
-                              disabled={disabled}
-                              aria-label={`Remove doser ${di + 1}`}
-                              className="h-9 w-9 shrink-0"
-                              onClick={() => removeDoser(i, di)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-critical" />
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <p className="mt-3 border-t border-border pt-3 text-2xs text-muted-foreground">
+            Per-zone valves and per-tank chemistry control are not yet
+            modelled in the new rooms tier — they will land in a
+            follow-up pass alongside the irrigation executor.
+          </p>
         </CardContent>
       </Card>
     </div>
   );
 }
+
+// Re-export the role specs in case page-level code needs to inspect
+// them (e.g. when computing what's "configured" in a room summary).
+export type { EquipmentType, SensorType };

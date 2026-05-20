@@ -74,6 +74,11 @@ class EquipmentBase(BaseModel):
     room_id: str | None = Field(default=None, alias="roomId")
     location_id: str | None = Field(default=None, alias="locationId")
 
+    integration_id: str | None = Field(default=None, alias="integrationId")
+    external_id: str | None = Field(
+        default=None, max_length=256, alias="externalId"
+    )
+
     status: EquipmentStatus
 
     last_maintenance: dt.datetime | None = Field(

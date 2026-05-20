@@ -11,6 +11,15 @@ Standard ``POST / GET-list / GET-one / PUT / DELETE`` surface per
 entity. Every endpoint requires the ``admin`` role (Class-E entity).
 Mutations write an ``info_event`` audit row; reads stay quiet.
 
+Grow recipes additionally expose two OCS-only routes for per-day
+overrides:
+
+* ``GET  /grow-recipes/{id}/effective-targets`` — phase-default +
+  override merge, returning the dense ``(day, paramName)`` grid (or one
+  ``day=N`` row when the query param is supplied).
+* ``PUT  /grow-recipes/{id}/day-overrides`` — bulk-replace this recipe's
+  overrides atomically (DELETE-then-INSERT in one transaction).
+
 JSON wire shape is camelCase + epoch-ms timestamps so it is
 byte-compatible with a Convex document. Snake_case input is also
 accepted because ``populate_by_name=True`` is set on every schema.
@@ -22,6 +31,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,11 +39,16 @@ from app.config import get_settings
 from app.core.acl import require_role
 from app.core.audit import log_audit
 from app.core.auth import Identity
+from app.core.recipe_resolver import (
+    RecipeResolutionError,
+    resolve_all_effective_targets,
+)
 from app.db import get_session
 from app.models.audit_event import AuditEventType
 from app.models.batch import Batch
 from app.models.genetics import Genetics
 from app.models.grow_recipe import GrowRecipe
+from app.models.grow_recipe_day_override import GrowRecipeDayOverride
 from app.models.plant import Plant
 from app.models.user import RoleName
 from app.schemas.cultivation import (
@@ -41,11 +56,13 @@ from app.schemas.cultivation import (
     BatchRead,
     GeneticsCreate,
     GeneticsRead,
+    GrowRecipeBase,
     GrowRecipeCreate,
     GrowRecipeRead,
     PlantCreate,
     PlantRead,
 )
+from app.schemas.recipe_overrides import DayOverrideCreate, DayOverrideRead
 
 log = structlog.get_logger(__name__)
 
@@ -772,3 +789,258 @@ async def delete_grow_recipe(
         grow_recipe_id=recipe_id,
     )
     return {"deleted": recipe_id}
+
+
+# ---------------------------------------------------------------------------
+# Grow recipes — per-day overrides (OCS extension)
+# ---------------------------------------------------------------------------
+
+
+class DayOverridesBulkReplace(BaseModel):
+    """Body for the bulk-replace endpoint.
+
+    Holds the full new set of overrides for one recipe. The endpoint
+    DELETEs every existing override row for the recipe and INSERTs the
+    new set atomically inside a single transaction, so callers don't
+    have to worry about ordering or partial state.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    overrides: list[DayOverrideCreate] = Field(default_factory=list)
+
+
+def _load_recipe_as_base(recipe: GrowRecipe) -> GrowRecipeBase:
+    """Re-hydrate a SQLAlchemy :class:`GrowRecipe` as a validated schema.
+
+    Validates against :class:`GrowRecipeRead` (which sets
+    ``from_attributes=True`` and therefore knows how to pull values off
+    an ORM instance) and upcasts to :class:`GrowRecipeBase` — the
+    resolver and validator both work over the base shape, and the only
+    reason to validate through :class:`GrowRecipeRead` here is to use
+    its ``from_attributes=True`` so the SQLAlchemy instance feeds in
+    directly without an intermediate ``dict()`` step.
+
+    The schema's post-validate hook on :class:`GrowRecipeBase` then
+    stamps ``start_day`` / ``end_day`` on every phase and re-sorts by
+    ``order``, surfacing structural errors (e.g. fractional duration
+    days) as a 422 at request time rather than deep in the resolver.
+    """
+    return GrowRecipeRead.model_validate(recipe)
+
+
+@router.get(
+    "/grow-recipes/{recipe_id}/effective-targets",
+    response_model_by_alias=True,
+)
+async def get_effective_targets(
+    recipe_id: str,
+    identity: Annotated[Identity, Depends(require_role(RoleName.admin))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    day: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            description=(
+                "Filter to a single day within the cycle. Returns every "
+                "param declared by the phase containing that day (or by "
+                "an override row on that day). Omit to get the dense "
+                "(day x param) grid for the whole cycle."
+            ),
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Resolve the effective per-day targets for a recipe.
+
+    Reads the recipe + all its overrides, runs the resolver, and returns
+    the wire-format ``EffectiveTarget`` rows. With ``day=N`` set, only
+    rows for that single day are returned (useful for the day editor in
+    the planner UI); without ``day`` the full grid is returned (useful
+    for the recipe overview).
+    """
+    settings = get_settings()
+    recipe = await session.get(GrowRecipe, recipe_id)
+    if recipe is None or recipe.org_id != settings.ocs_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"grow recipe '{recipe_id}' not found",
+        )
+
+    validated = _load_recipe_as_base(recipe)
+
+    override_rows = (
+        await session.execute(
+            select(GrowRecipeDayOverride).where(
+                GrowRecipeDayOverride.recipe_id == recipe_id,
+                GrowRecipeDayOverride.org_id == settings.ocs_org_id,
+            )
+        )
+    ).scalars()
+    overrides = list(override_rows)
+
+    if day is not None:
+        if day < 1 or day > validated.cycle_day_count:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"day {day} is outside this recipe's cycle "
+                    f"[1, {validated.cycle_day_count}]"
+                ),
+            )
+        # Single-day filter — emit only rows for the requested day.
+        all_rows = resolve_all_effective_targets(validated, overrides)
+        items = [r for r in all_rows if r.day == day]
+    else:
+        items = resolve_all_effective_targets(validated, overrides)
+
+    log.info(
+        "grow_recipe_effective_targets_resolved",
+        actor=identity.user_id,
+        grow_recipe_id=recipe_id,
+        day=day,
+        cell_count=len(items),
+    )
+    return {
+        "effectiveTargets": [
+            t.model_dump(mode="json", by_alias=True) for t in items
+        ],
+        "cycleDayCount": validated.cycle_day_count,
+    }
+
+
+@router.put(
+    "/grow-recipes/{recipe_id}/day-overrides",
+    response_model_by_alias=True,
+)
+async def replace_day_overrides(
+    recipe_id: str,
+    body: DayOverridesBulkReplace,
+    identity: Annotated[Identity, Depends(require_role(RoleName.admin))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, Any]:
+    """Bulk-replace every override row for a recipe atomically.
+
+    The body holds the FULL new override set. Existing override rows for
+    this recipe are deleted, the new set is inserted, and the
+    transaction commits as one unit — there is no intermediate state
+    where the recipe has zero overrides visible to other readers.
+
+    Each new override's ``day`` is range-checked against the recipe's
+    ``cycle_day_count`` (resolved via the validated schema) and the
+    resolver itself is run as a smoke test against the new set; a
+    :class:`RecipeResolutionError` is mapped to HTTP 422 so the planner
+    UI can show the cell that failed.
+    """
+    settings = get_settings()
+    recipe = await session.get(GrowRecipe, recipe_id)
+    if recipe is None or recipe.org_id != settings.ocs_org_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"grow recipe '{recipe_id}' not found",
+        )
+
+    validated = _load_recipe_as_base(recipe)
+
+    # Range-check every incoming override BEFORE any DB mutation —
+    # avoids leaving the recipe override-less if the body is malformed.
+    for override in body.overrides:
+        if override.day < 1 or override.day > validated.cycle_day_count:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"override on day {override.day} param "
+                    f"{override.param_name!r} is outside this recipe's "
+                    f"cycle [1, {validated.cycle_day_count}]"
+                ),
+            )
+
+    # DELETE-then-INSERT in one transaction. Loading the existing rows
+    # through the ORM (rather than a bulk DELETE statement) keeps the
+    # identity map consistent and lets ON DELETE CASCADE / SQLAlchemy
+    # event listeners run if any are wired up.
+    existing = (
+        await session.execute(
+            select(GrowRecipeDayOverride).where(
+                GrowRecipeDayOverride.recipe_id == recipe_id,
+                GrowRecipeDayOverride.org_id == settings.ocs_org_id,
+            )
+        )
+    ).scalars()
+    deleted_count = 0
+    for row in existing:
+        await session.delete(row)
+        deleted_count += 1
+    # Flush the deletes BEFORE adding the new rows so the unique
+    # constraint on (recipe_id, day, param_name) does not trip on a
+    # day/param pair the caller is also re-supplying.
+    await session.flush()
+
+    new_rows: list[GrowRecipeDayOverride] = []
+    for override in body.overrides:
+        new_row = GrowRecipeDayOverride(
+            org_id=settings.ocs_org_id,
+            recipe_id=recipe_id,
+            day=override.day,
+            param_name=override.param_name,
+            value=override.value,
+            tolerance=override.tolerance,
+            unit=override.unit,
+        )
+        session.add(new_row)
+        new_rows.append(new_row)
+    await session.flush()
+    for new_row in new_rows:
+        await session.refresh(new_row)
+
+    # Smoke-test the resolver against the new state for any over-defined
+    # cells (a structurally-broken recipe would have failed earlier; the
+    # resolver is exercised here to surface override-vs-phase
+    # interactions like an orphan param on a phase with no defaults).
+    try:
+        resolve_all_effective_targets(validated, new_rows)
+    except RecipeResolutionError as exc:
+        # Roll back by raising — the FastAPI ``get_session`` context will
+        # handle the rollback on exception.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    await log_audit(
+        session,
+        event_type=AuditEventType.info_event,
+        actor_id=identity.user_id,
+        actor_role="admin",
+        summary=(
+            f"Grow recipe '{recipe.name}' day-overrides replaced "
+            f"(deleted={deleted_count}, inserted={len(new_rows)})"
+        ),
+        params={
+            "grow_recipe_id": recipe.id,
+            "deleted": deleted_count,
+            "inserted": len(new_rows),
+        },
+    )
+    await session.commit()
+
+    # Re-resolve a single ``(day=1, first declared param)`` cell would be
+    # cheap but adds no value — the caller can hit GET
+    # /effective-targets to confirm. Return the new override set echo'd
+    # back so the UI can hydrate without a second round trip.
+    log.info(
+        "grow_recipe_day_overrides_replaced",
+        actor=identity.user_id,
+        grow_recipe_id=recipe_id,
+        deleted=deleted_count,
+        inserted=len(new_rows),
+    )
+    return {
+        "deleted": deleted_count,
+        "inserted": len(new_rows),
+        "overrides": [
+            DayOverrideRead.model_validate(r).model_dump(
+                mode="json", by_alias=True
+            )
+            for r in new_rows
+        ],
+    }

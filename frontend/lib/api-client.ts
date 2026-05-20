@@ -30,10 +30,23 @@ import type {
   AuditEventsResponse,
   AuditEventType,
   AuditVerifyResponse,
+  Building,
+  BuildingUpsertBody,
+  BuildingsResponse,
+  ConvexRoom,
+  ConvexRoomUpsertBody,
+  ConvexRoomsResponse,
+  DeleteResponse,
   DeviationsResponse,
+  Equipment,
+  EquipmentResponse,
+  EquipmentUpsertBody,
   GuardrailsResponse,
-  NoTouchWindowsResponse,
   HaRegistryResponse,
+  Location,
+  LocationUpsertBody,
+  LocationsResponse,
+  NoTouchWindowsResponse,
   PendingApprovalDetail,
   PendingApprovalSummary,
   ReadyzResponse,
@@ -42,8 +55,11 @@ import type {
   RolloutResponse,
   Room,
   RoomDeleteResponse,
-  RoomsResponse,
   RoomUpsertBody,
+  RoomsResponse,
+  Sensor,
+  SensorUpsertBody,
+  SensorsResponse,
   TelegramMapResponse,
   UserUpsertBody,
 } from "@/lib/types";
@@ -277,6 +293,139 @@ export const api = {
   deleteRoom: (roomId: string) =>
     request<RoomDeleteResponse>(
       `/api/rooms/${encodeURIComponent(roomId)}`,
+      { method: "DELETE" },
+    ),
+
+  // --- Convex-aligned facility tier (`/api/sites/*`) ---------------
+  //
+  // The pass-5b admin/rooms page reads buildings + rooms + locations
+  // through this surface instead of the legacy `/api/rooms`. Sensors
+  // and equipment are filtered by `roomId` (and, for the picker's
+  // dedupe lookup, by `externalId`) — every wrapper below is a thin
+  // pass-through to keep the call sites in the page readable.
+
+  listBuildings: (signal?: AbortSignal) =>
+    request<BuildingsResponse>("/api/sites/buildings", { signal }),
+  createBuilding: (body: BuildingUpsertBody) =>
+    request<Building>("/api/sites/buildings", { method: "POST", body }),
+  getBuilding: (buildingId: string, signal?: AbortSignal) =>
+    request<Building>(
+      `/api/sites/buildings/${encodeURIComponent(buildingId)}`,
+      { signal },
+    ),
+  updateBuilding: (buildingId: string, body: BuildingUpsertBody) =>
+    request<Building>(
+      `/api/sites/buildings/${encodeURIComponent(buildingId)}`,
+      { method: "PUT", body },
+    ),
+  deleteBuilding: (buildingId: string) =>
+    request<DeleteResponse>(
+      `/api/sites/buildings/${encodeURIComponent(buildingId)}`,
+      { method: "DELETE" },
+    ),
+
+  /** List Convex-aligned rooms (optionally filtered by buildingId). */
+  listConvexRooms: (buildingId?: string, signal?: AbortSignal) =>
+    request<ConvexRoomsResponse>("/api/sites/rooms", {
+      query: { buildingId },
+      signal,
+    }),
+  createConvexRoom: (body: ConvexRoomUpsertBody) =>
+    request<ConvexRoom>("/api/sites/rooms", { method: "POST", body }),
+  getConvexRoom: (roomId: string, signal?: AbortSignal) =>
+    request<ConvexRoom>(`/api/sites/rooms/${encodeURIComponent(roomId)}`, {
+      signal,
+    }),
+  updateConvexRoom: (roomId: string, body: ConvexRoomUpsertBody) =>
+    request<ConvexRoom>(`/api/sites/rooms/${encodeURIComponent(roomId)}`, {
+      method: "PUT",
+      body,
+    }),
+  deleteConvexRoom: (roomId: string) =>
+    request<DeleteResponse>(`/api/sites/rooms/${encodeURIComponent(roomId)}`, {
+      method: "DELETE",
+    }),
+
+  listLocations: (roomId?: string, signal?: AbortSignal) =>
+    request<LocationsResponse>("/api/sites/locations", {
+      query: { roomId },
+      signal,
+    }),
+  createLocation: (body: LocationUpsertBody) =>
+    request<Location>("/api/sites/locations", { method: "POST", body }),
+  getLocation: (locationId: string, signal?: AbortSignal) =>
+    request<Location>(
+      `/api/sites/locations/${encodeURIComponent(locationId)}`,
+      { signal },
+    ),
+  updateLocation: (locationId: string, body: LocationUpsertBody) =>
+    request<Location>(
+      `/api/sites/locations/${encodeURIComponent(locationId)}`,
+      { method: "PUT", body },
+    ),
+  deleteLocation: (locationId: string) =>
+    request<DeleteResponse>(
+      `/api/sites/locations/${encodeURIComponent(locationId)}`,
+      { method: "DELETE" },
+    ),
+
+  // --- sensors -----------------------------------------------------
+  /**
+   * List sensors. The picker filters by `roomId` (every room is one
+   * scope) and optionally by `externalId` to check whether an HA
+   * entity already has a record before POSTing a new one.
+   */
+  listSensors: (
+    params?: { roomId?: string; type?: string; externalId?: string },
+    signal?: AbortSignal,
+  ) =>
+    request<SensorsResponse>("/api/sensors", {
+      query: params as QueryParams,
+      signal,
+    }),
+  /**
+   * Create a sensor. The backend lazy-resolves the singleton HA
+   * `integrationId` when the payload sets `externalId` but leaves
+   * `integrationId` undefined — so the picker never needs to know it.
+   */
+  createSensor: (body: SensorUpsertBody) =>
+    request<Sensor>("/api/sensors", { method: "POST", body }),
+  getSensor: (sensorId: string, signal?: AbortSignal) =>
+    request<Sensor>(`/api/sensors/${encodeURIComponent(sensorId)}`, { signal }),
+  updateSensor: (sensorId: string, body: SensorUpsertBody) =>
+    request<Sensor>(`/api/sensors/${encodeURIComponent(sensorId)}`, {
+      method: "PUT",
+      body,
+    }),
+  deleteSensor: (sensorId: string) =>
+    request<DeleteResponse>(`/api/sensors/${encodeURIComponent(sensorId)}`, {
+      method: "DELETE",
+    }),
+
+  // --- equipment ---------------------------------------------------
+  listEquipment: (
+    params?: { roomId?: string; type?: string; externalId?: string },
+    signal?: AbortSignal,
+  ) =>
+    request<EquipmentResponse>("/api/equipment", {
+      query: params as QueryParams,
+      signal,
+    }),
+  createEquipment: (body: EquipmentUpsertBody) =>
+    request<Equipment>("/api/equipment", { method: "POST", body }),
+  getEquipment: (equipmentId: string, signal?: AbortSignal) =>
+    request<Equipment>(
+      `/api/equipment/${encodeURIComponent(equipmentId)}`,
+      { signal },
+    ),
+  updateEquipment: (equipmentId: string, body: EquipmentUpsertBody) =>
+    request<Equipment>(`/api/equipment/${encodeURIComponent(equipmentId)}`, {
+      method: "PUT",
+      body,
+    }),
+  deleteEquipment: (equipmentId: string) =>
+    request<DeleteResponse>(
+      `/api/equipment/${encodeURIComponent(equipmentId)}`,
       { method: "DELETE" },
     ),
 };

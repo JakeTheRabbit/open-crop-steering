@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.sensors import resolve_home_assistant_integration_id
 from app.config import get_settings
 from app.core.acl import require_role
 from app.core.audit import log_audit
@@ -46,11 +47,23 @@ async def create_equipment(
     identity: Annotated[Identity, Depends(require_role(RoleName.admin))],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Equipment:
-    """Create an equipment record."""
+    """Create an equipment record.
+
+    If the payload omits ``integrationId`` *and* declares an
+    ``externalId`` (a Home Assistant entity id, by convention), the
+    backend lazy-resolves the singleton ``home_assistant`` integration
+    row and attaches the equipment to it. This keeps the entity-picker
+    UX zero-config — the frontend never has to know the integration id.
+    """
     settings = get_settings()
+    payload = body.model_dump(by_alias=False)
+    if payload.get("integration_id") is None and payload.get("external_id"):
+        payload["integration_id"] = await resolve_home_assistant_integration_id(
+            session, settings.ocs_org_id
+        )
     equipment = Equipment(
         org_id=settings.ocs_org_id,
-        **body.model_dump(by_alias=False),
+        **payload,
     )
     session.add(equipment)
     await session.flush()
@@ -91,6 +104,17 @@ async def list_equipment(
         str | None,
         Query(alias="status", description="Filter to one status."),
     ] = None,
+    external_id: Annotated[
+        str | None,
+        Query(
+            alias="externalId",
+            description=(
+                "Filter to a single source-system identifier (e.g. an HA "
+                "entity id). Used by the entity picker to check whether "
+                "equipment for a given HA entity already exists in a room."
+            ),
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """List equipment in the current tenant, optionally filtered."""
     settings = get_settings()
@@ -101,6 +125,8 @@ async def list_equipment(
         stmt = stmt.where(Equipment.type == type_)
     if status_filter is not None:
         stmt = stmt.where(Equipment.status == status_filter)
+    if external_id is not None:
+        stmt = stmt.where(Equipment.external_id == external_id)
     rows = (
         await session.execute(stmt.order_by(Equipment.created_at))
     ).scalars()
@@ -115,6 +141,7 @@ async def list_equipment(
         room_id=room_id,
         type=type_,
         status=status_filter,
+        external_id=external_id,
     )
     return {"equipment": items}
 

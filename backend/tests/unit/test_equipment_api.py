@@ -14,10 +14,12 @@ from typing import Any
 import httpx
 import pytest
 from app.api import equipment as equipment_api
+from app.api import sensors as sensors_api
 from app.core import acl
 from app.core.auth import Identity, current_identity
 from app.db import get_session
 from app.models.equipment import Equipment
+from app.models.sensor_integration import SensorIntegration
 from app.models.user import RoleName
 from fastapi import FastAPI
 from httpx import ASGITransport
@@ -29,12 +31,25 @@ _FAKE_ORG = "open-crop-steering"
 _FIXED_NOW = dt.datetime(2026, 5, 20, 12, 0, tzinfo=dt.UTC)
 
 
+class _FakeScalars:
+    """Stand-in for SQLAlchemy's :class:`ScalarResult`."""
+
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = list(rows)
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._rows)
+
+    def first(self) -> object | None:
+        return self._rows[0] if self._rows else None
+
+
 class _FakeResult:
     def __init__(self, rows: list[object]) -> None:
         self._rows = list(rows)
 
-    def scalars(self) -> list[object]:
-        return list(self._rows)
+    def scalars(self) -> _FakeScalars:
+        return _FakeScalars(list(self._rows))
 
 
 class _FakeSession:
@@ -86,6 +101,10 @@ def _noop_log_audit(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr(equipment_api, "log_audit", _stub)
+    # The HA-integration lazy-resolver lives on ``sensors_api`` but is
+    # called from ``equipment_api`` for the lazy-create flow; silence
+    # its own ``log_audit`` too.
+    monkeypatch.setattr(sensors_api, "log_audit", _stub)
 
 
 @pytest.fixture(autouse=True)
@@ -187,3 +206,33 @@ class TestEquipment:
             assert d.json() == {"deleted": "eq-1"}
             g = await client.get("/api/equipment/eq-1")
             assert g.status_code == 404
+
+    async def test_external_id_query_filter(self) -> None:
+        session = _FakeSession()
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/equipment",
+                params={"externalId": "climate.f2_ac_door"},
+            )
+        assert resp.status_code == 200
+        assert "equipment" in resp.json()
+
+    async def test_lazy_create_ha_integration_on_external_id(self) -> None:
+        session = _FakeSession()
+        payload = {
+            **_payload(),
+            "externalId": "climate.f2_ac_door_f2_ac_door",
+        }
+        async with await _client(session) as client:
+            resp = await client.post("/api/equipment", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["integrationId"] is not None
+        integrations = [
+            r
+            for (t, _), r in session.store.items()
+            if t is SensorIntegration
+        ]
+        assert len(integrations) == 1
+        assert integrations[0].type == "home_assistant"
+        assert body["integrationId"] == integrations[0].id

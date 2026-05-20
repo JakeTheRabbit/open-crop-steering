@@ -55,6 +55,15 @@ class Equipment(Base):
         room_id: Optional parent room; ``SET NULL`` on parent delete.
         location_id: Optional parent location; ``SET NULL`` on parent
             delete.
+        integration_id: Optional FK to a
+            :class:`~app.models.sensor_integration.SensorIntegration` —
+            for HA-managed equipment, points at the auto-created
+            ``home_assistant`` integration row. ``SET NULL`` on delete
+            so losing the integration leaves the equipment intact.
+        external_id: Optional identifier in the integration's source
+            system (Home Assistant entity_id, MQTT topic, etc.). The
+            entity picker uses ``(org_id, external_id)`` to detect
+            duplicates when an operator re-picks an HA entity.
         status: Lifecycle state. One of ``operational``, ``maintenance``,
             ``repair``, ``retired``.
         last_maintenance / next_maintenance: Optional service timestamps.
@@ -104,6 +113,21 @@ class Equipment(Base):
         nullable=True,
     )
 
+    # Optional link back to the integration that owns this asset
+    # (Home Assistant, MQTT, …). ``ON DELETE SET NULL`` so the
+    # equipment record survives a wiped integration; the picker can
+    # re-attach it later.
+    integration_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("sensor_integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The identifier of this asset in the integration's source system
+    # — typically a Home Assistant entity id like ``climate.f2_ac_door``.
+    # Indexed alongside ``org_id`` so the entity picker's "is this
+    # already a record?" lookup is a single B-tree probe.
+    external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
     # Convex union: operational | maintenance | repair | retired.
     status: Mapped[str] = mapped_column(String(32), nullable=False)
 
@@ -141,6 +165,8 @@ class Equipment(Base):
         Index("ix_equipment_org_room", "org_id", "room_id"),
         Index("ix_equipment_org_status", "org_id", "status"),
         Index("ix_equipment_org_active", "org_id", "is_active"),
+        Index("ix_equipment_org_external", "org_id", "external_id"),
+        Index("ix_equipment_org_integration", "org_id", "integration_id"),
         # Convex defines a searchIndex("search_name") for fuzzy text
         # search; Postgres equivalent here is a plain B-tree on ``name``
         # because full-text search isn't needed for the alignment job.

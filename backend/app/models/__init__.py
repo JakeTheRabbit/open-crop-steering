@@ -21,6 +21,7 @@ from app.models.equipment import Equipment
 from app.models.event_log import EventLogEntry, EventSeverity
 from app.models.genetics import Genetics
 from app.models.grow_recipe import GrowRecipe
+from app.models.grow_recipe_day_override import GrowRecipeDayOverride
 from app.models.llm_call_log import LLMCallLog, LLMCallOutcome
 from app.models.location import Location
 from app.models.pending_approval import PendingApproval, PendingStatus
@@ -62,6 +63,7 @@ __all__ = [
     "EventSeverity",
     "Genetics",
     "GrowRecipe",
+    "GrowRecipeDayOverride",
     "LLMCallLog",
     "LLMCallOutcome",
     "Location",

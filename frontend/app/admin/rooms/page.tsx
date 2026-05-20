@@ -7,119 +7,96 @@ import { Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import type {
+  Building,
+  ConvexRoom,
   HaEntity,
-  Room,
-  RoomEquipmentMap,
-  RoomUpsertBody,
-  RoomZone,
 } from "@/lib/types";
 import { PageHeader } from "@/components/page-header";
 import { QueryState, errorText } from "@/components/query-state";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { RoomEquipmentForm } from "@/components/admin/room-equipment-form";
 
 /**
- * Admin — Rooms & Equipment.
+ * Admin — Rooms & Equipment (pass-5b).
  *
- * Lets an admin map Home Assistant entities to per-room control roles.
- * The left column lists configured rooms (`GET /api/rooms`); selecting
- * one loads its `equipment_map` into the {@link RoomEquipmentForm}.
- * Saving issues a `PUT /api/rooms/{room_id}`.
+ * The page now talks to the Convex-aligned tables instead of the
+ * legacy `room_runtime.equipment_map` blob:
  *
- * Static export — all data fetching is client-side via TanStack Query.
+ * * `GET /api/sites/buildings` (lazy-creates "Facility" on first load)
+ * * `GET /api/sites/rooms?buildingId=…` (the room list)
+ * * `POST /api/sites/rooms` (create), `DELETE …` (delete)
+ * * `GET /api/sensors?roomId=…` + `GET /api/equipment?roomId=…`
+ *   (the editor's source data, fetched per-room on selection)
+ *
+ * The per-room editor ({@link RoomEquipmentForm}) writes through
+ * {@link SensorRolePicker} — one POST / DELETE per picked entity.
+ * There is no draft / Save Room button: each pick applies
+ * immediately and the underlying queries refetch.
+ *
+ * Single-facility install assumption: the page auto-creates exactly
+ * one `Facility` building if none exists, then pre-selects it. A
+ * follow-up pass can surface a building-switcher when multi-building
+ * installs land.
  */
 
-/**
- * Build a complete, default {@link RoomEquipmentMap} for `roomId`.
- *
- * The backend schema is `extra="forbid"`, so the saved body must carry
- * exactly these keys. A room with `equipment_map === {}` (unconfigured)
- * is normalized through here; an existing partial map is merged on top.
- */
-function defaultEquipmentMap(
-  roomId: string,
-  existing?: Partial<RoomEquipmentMap>,
-): RoomEquipmentMap {
-  /** Copy a list-valued field, or default to an empty list. */
-  const list = (v: readonly string[] | undefined): string[] =>
-    v ? [...v] : [];
-  /** Normalize a zone to the current multi-entity shape. */
-  const zone = (z: Partial<RoomZone>, i: number): RoomZone => ({
-    zone_id: z.zone_id ?? `zone${i + 1}`,
-    valve_entities: list(z.valve_entities),
-    vwc_sensors: list(z.vwc_sensors),
-    ec_sensors: list(z.ec_sensors),
-  });
-  return {
-    room_id: roomId,
-    env_control_enabled: existing?.env_control_enabled ?? false,
-    ppfd_control_enabled: existing?.ppfd_control_enabled ?? false,
-    irrigation_control_enabled: existing?.irrigation_control_enabled ?? false,
-    tank_control_enabled: existing?.tank_control_enabled ?? false,
-    co2_control_enabled: existing?.co2_control_enabled ?? false,
-    temp_sensors: list(existing?.temp_sensors),
-    rh_sensors: list(existing?.rh_sensors),
-    co2_sensors: list(existing?.co2_sensors),
-    leaf_temp_sensors: list(existing?.leaf_temp_sensors),
-    under_canopy_rh_probes: list(existing?.under_canopy_rh_probes),
-    vwc_sensors: list(existing?.vwc_sensors),
-    ec_sensors: list(existing?.ec_sensors),
-    ppfd_sensors: list(existing?.ppfd_sensors),
-    dli_sensors: list(existing?.dli_sensors),
-    pm1_sensors: list(existing?.pm1_sensors),
-    pm25_sensors: list(existing?.pm25_sensors),
-    pm4_sensors: list(existing?.pm4_sensors),
-    pm10_sensors: list(existing?.pm10_sensors),
-    cooling_capacity_entity: existing?.cooling_capacity_entity ?? null,
-    light_entities: list(existing?.light_entities),
-    ac_entities: list(existing?.ac_entities),
-    dehumidifier_entities: list(existing?.dehumidifier_entities),
-    reheat_entities: list(existing?.reheat_entities),
-    exhaust_entities: list(existing?.exhaust_entities),
-    co2_solenoid_entities: list(existing?.co2_solenoid_entities),
-    irrigation_pump_entities: list(existing?.irrigation_pump_entities),
-    mainline_valve_entities: list(existing?.mainline_valve_entities),
-    zones: existing?.zones ? existing.zones.map(zone) : [],
-    tanks: existing?.tanks
-      ? existing.tanks.map((t) => ({
-          ...t,
-          doser_entities: [...t.doser_entities],
-        }))
-      : [],
-  };
-}
-
-/** True when `equipment_map` carries real config rather than `{}`. */
-function hasEquipmentMap(
-  m: Room["equipment_map"],
-): m is RoomEquipmentMap {
-  return typeof m === "object" && m !== null && "room_id" in m;
-}
-
-/** A draft being edited: the room id, display name and equipment map. */
-interface RoomDraft {
-  roomId: string;
-  displayName: string;
-  equipmentMap: RoomEquipmentMap;
-  /** True for a brand-new room not yet persisted. */
-  isNew: boolean;
-}
+const DEFAULT_FACILITY_NAME = "Facility";
 
 export default function AdminRoomsPage() {
   const queryClient = useQueryClient();
 
-  const roomsQuery = useQuery({
-    queryKey: queryKeys.rooms,
-    queryFn: ({ signal }) => api.listRooms(signal),
+  // --- buildings: load → lazy-create one named "Facility" -----------
+  const buildingsQuery = useQuery({
+    queryKey: queryKeys.buildings,
+    queryFn: ({ signal }) => api.listBuildings(signal),
   });
+
+  const buildings = React.useMemo(
+    () => buildingsQuery.data?.buildings ?? [],
+    [buildingsQuery.data],
+  );
+
+  /** Pick a building to act under — the first one returned, by created order. */
+  const activeBuilding: Building | null = buildings[0] ?? null;
+
+  const ensureFacilityMutation = useMutation({
+    mutationFn: () => api.createBuilding({ name: DEFAULT_FACILITY_NAME }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.buildings });
+    },
+  });
+
+  // After the buildings query lands with no rows, kick off a one-shot
+  // POST so the rest of the page has a building to scope queries to.
+  React.useEffect(() => {
+    if (
+      buildingsQuery.isSuccess &&
+      buildings.length === 0 &&
+      !ensureFacilityMutation.isPending &&
+      !ensureFacilityMutation.isSuccess
+    ) {
+      ensureFacilityMutation.mutate();
+    }
+  }, [
+    buildingsQuery.isSuccess,
+    buildings.length,
+    ensureFacilityMutation,
+  ]);
+
+  // --- rooms scoped to the active building --------------------------
+  const roomsQuery = useQuery({
+    queryKey: queryKeys.convexRooms(activeBuilding?.id),
+    queryFn: ({ signal }) =>
+      api.listConvexRooms(activeBuilding?.id ?? undefined, signal),
+    enabled: activeBuilding !== null,
+  });
+
+  // --- HA registry (cached, large) ----------------------------------
   const registryQuery = useQuery({
     queryKey: queryKeys.haRegistry,
     queryFn: ({ signal }) => api.getHaRegistry(signal),
-    // The registry is large and changes rarely — cache it generously.
     staleTime: 5 * 60_000,
     refetchInterval: false,
   });
@@ -143,110 +120,105 @@ export default function AdminRoomsPage() {
     return m;
   }, [entities]);
 
-  const [selectedId, setSelectedId] = React.useState<string | null>(null);
-  const [draft, setDraft] = React.useState<RoomDraft | null>(null);
+  const [selectedRoomId, setSelectedRoomId] = React.useState<string | null>(
+    null,
+  );
+
+  const selectedRoom = React.useMemo<ConvexRoom | null>(
+    () => rooms.find((r) => r.id === selectedRoomId) ?? null,
+    [rooms, selectedRoomId],
+  );
+
+  // --- per-room sensors / equipment (fetched on selection) -----------
+  const sensorsQuery = useQuery({
+    queryKey: queryKeys.sensorsByRoom(selectedRoomId ?? ""),
+    queryFn: ({ signal }) =>
+      api.listSensors({ roomId: selectedRoomId ?? "" }, signal),
+    enabled: selectedRoomId !== null,
+  });
+  const equipmentQuery = useQuery({
+    queryKey: queryKeys.equipmentByRoom(selectedRoomId ?? ""),
+    queryFn: ({ signal }) =>
+      api.listEquipment({ roomId: selectedRoomId ?? "" }, signal),
+    enabled: selectedRoomId !== null,
+  });
+
+  const sensors = React.useMemo(
+    () => sensorsQuery.data?.sensors ?? [],
+    [sensorsQuery.data],
+  );
+  const equipment = React.useMemo(
+    () => equipmentQuery.data?.equipment ?? [],
+    [equipmentQuery.data],
+  );
+
+  // --- create / delete room -----------------------------------------
   const [createOpen, setCreateOpen] = React.useState(false);
-  const [newRoomId, setNewRoomId] = React.useState("");
-  const [newDisplayName, setNewDisplayName] = React.useState("");
-  const [deleteTarget, setDeleteTarget] = React.useState<Room | null>(null);
-  const [saved, setSaved] = React.useState<string | null>(null);
+  const [newRoomName, setNewRoomName] = React.useState("");
+  const [deleteTarget, setDeleteTarget] = React.useState<ConvexRoom | null>(
+    null,
+  );
 
-  /** Load an existing room into the editor. */
-  const selectRoom = React.useCallback((room: Room) => {
-    setSelectedId(room.room_id);
-    setSaved(null);
-    setDraft({
-      roomId: room.room_id,
-      displayName: room.display_name ?? "",
-      equipmentMap: defaultEquipmentMap(
-        room.room_id,
-        hasEquipmentMap(room.equipment_map)
-          ? room.equipment_map
-          : undefined,
-      ),
-      isNew: false,
-    });
-  }, []);
-
-  const saveMutation = useMutation({
-    mutationFn: (vars: { roomId: string; body: RoomUpsertBody }) =>
-      api.saveRoom(vars.roomId, vars.body),
+  const createRoomMutation = useMutation({
+    mutationFn: () =>
+      api.createConvexRoom({
+        buildingId: activeBuilding!.id,
+        name: newRoomName.trim().toUpperCase(),
+      }),
     onSuccess: (room) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.rooms });
-      setSaved(room.room_id);
-      setDraft((prev) =>
-        prev ? { ...prev, isNew: false } : prev,
-      );
-      setSelectedId(room.room_id);
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.convexRooms(activeBuilding?.id),
+      });
+      setSelectedRoomId(room.id);
+      setNewRoomName("");
+      setCreateOpen(false);
     },
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: (roomId: string) => api.deleteRoom(roomId),
+  const deleteRoomMutation = useMutation({
+    mutationFn: (roomId: string) => api.deleteConvexRoom(roomId),
     onSuccess: (_res, roomId) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.rooms });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.convexRooms(activeBuilding?.id),
+      });
       setDeleteTarget(null);
-      if (selectedId === roomId) {
-        setSelectedId(null);
-        setDraft(null);
-      }
+      if (selectedRoomId === roomId) setSelectedRoomId(null);
     },
   });
 
   /** Match a room to an HA area by id or name (best-effort). */
   const roomAreaId = React.useMemo(() => {
-    if (!draft) return null;
-    const wanted = draft.roomId.toLowerCase();
-    const wantedName = draft.displayName.trim().toLowerCase();
+    if (!selectedRoom) return null;
+    const wantedName = selectedRoom.name.trim().toLowerCase();
     const hit = areas.find(
       (a) =>
-        a.area_id.toLowerCase() === wanted ||
-        a.name.toLowerCase() === wanted ||
-        (wantedName && a.name.toLowerCase() === wantedName),
+        a.area_id.toLowerCase() === wantedName ||
+        a.name.toLowerCase() === wantedName,
     );
     return hit?.area_id ?? null;
-  }, [draft, areas]);
+  }, [selectedRoom, areas]);
 
-  const handleSave = () => {
-    if (!draft) return;
-    setSaved(null);
-    saveMutation.mutate({
-      roomId: draft.roomId,
-      body: {
-        display_name: draft.displayName.trim() || null,
-        // room_id must equal the path param — keep them in lockstep.
-        equipment_map: { ...draft.equipmentMap, room_id: draft.roomId },
-      },
-    });
-  };
+  const newRoomNameValid =
+    newRoomName.trim().length > 0 &&
+    !rooms.some(
+      (r) => r.name.toLowerCase() === newRoomName.trim().toLowerCase(),
+    );
 
-  const handleCreate = () => {
-    const id = newRoomId.trim();
-    if (!id) return;
-    setCreateOpen(false);
-    setSelectedId(id);
-    setSaved(null);
-    setDraft({
-      roomId: id,
-      displayName: newDisplayName.trim(),
-      equipmentMap: defaultEquipmentMap(id),
-      isNew: true,
-    });
-    setNewRoomId("");
-    setNewDisplayName("");
-  };
-
-  const newRoomIdValid =
-    newRoomId.trim().length > 0 &&
-    !rooms.some((r) => r.room_id === newRoomId.trim());
+  // ------------------------------------------------------------------
+  // Render
+  // ------------------------------------------------------------------
 
   return (
     <div>
       <PageHeader
         title="Rooms & Equipment"
-        description="Map Home Assistant entities to per-room control roles."
+        description="Map Home Assistant entities to per-room sensor and equipment records."
         actions={
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
+          <Button
+            size="sm"
+            onClick={() => setCreateOpen(true)}
+            disabled={activeBuilding === null}
+          >
             <Plus className="h-3.5 w-3.5" />
             New room
           </Button>
@@ -263,27 +235,38 @@ export default function AdminRoomsPage() {
         </Card>
       ) : null}
 
+      {ensureFacilityMutation.isError ? (
+        <Card className="mb-4 border-critical/40 bg-critical/10">
+          <CardContent className="p-3 text-xs text-critical">
+            Could not auto-create the &quot;Facility&quot; building:{" "}
+            {errorText(ensureFacilityMutation.error)}.
+          </CardContent>
+        </Card>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[16rem_1fr]">
         {/* room list */}
         <div>
           <QueryState
-            isLoading={roomsQuery.isLoading}
-            isError={roomsQuery.isError}
-            error={roomsQuery.error}
-            isEmpty={rooms.length === 0}
-            emptyMessage="No rooms configured. Create the first room to begin."
+            isLoading={
+              buildingsQuery.isLoading ||
+              (activeBuilding !== null && roomsQuery.isLoading)
+            }
+            isError={buildingsQuery.isError || roomsQuery.isError}
+            error={buildingsQuery.error ?? roomsQuery.error}
+            isEmpty={activeBuilding !== null && rooms.length === 0}
+            emptyMessage="No rooms in this facility. Create the first room to begin."
           >
             <Card>
               <CardContent className="space-y-1 p-2">
                 {rooms.map((r) => {
-                  const active = r.room_id === selectedId;
-                  const configured = hasEquipmentMap(r.equipment_map);
+                  const active = r.id === selectedRoomId;
                   return (
-                    <div key={r.room_id} className="flex items-center gap-1">
+                    <div key={r.id} className="flex items-center gap-1">
                       <button
                         type="button"
                         data-testid="room-list-item"
-                        onClick={() => selectRoom(r)}
+                        onClick={() => setSelectedRoomId(r.id)}
                         className={
                           active
                             ? "flex-1 rounded-md bg-primary/15 px-2.5 py-1.5 text-left text-sm text-primary"
@@ -291,18 +274,19 @@ export default function AdminRoomsPage() {
                         }
                       >
                         <span className="block font-mono font-semibold uppercase">
-                          {r.room_id}
+                          {r.name}
                         </span>
-                        <span className="block text-2xs text-muted-foreground">
-                          {r.display_name || "—"}
-                          {!configured ? " · unconfigured" : ""}
-                        </span>
+                        {r.purpose ? (
+                          <span className="block text-2xs text-muted-foreground">
+                            {r.purpose}
+                          </span>
+                        ) : null}
                       </button>
                       <Button
                         type="button"
                         size="icon"
                         variant="ghost"
-                        aria-label={`Delete room ${r.room_id}`}
+                        aria-label={`Delete room ${r.name}`}
                         className="h-8 w-8 shrink-0"
                         onClick={() => setDeleteTarget(r)}
                       >
@@ -318,7 +302,7 @@ export default function AdminRoomsPage() {
 
         {/* editor */}
         <div>
-          {!draft ? (
+          {!selectedRoom ? (
             <Card>
               <CardContent className="p-8 text-center text-sm text-muted-foreground">
                 Select a room on the left, or create a new one, to assign
@@ -331,64 +315,38 @@ export default function AdminRoomsPage() {
                 <CardContent className="space-y-3 p-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-base font-semibold uppercase">
-                      {draft.roomId}
+                      {selectedRoom.name}
                     </span>
-                    {draft.isNew ? (
-                      <Badge variant="warning">unsaved — new room</Badge>
-                    ) : null}
                   </div>
-                  <div>
-                    <label className="mb-1 block text-xs text-muted-foreground">
-                      Display name
-                    </label>
-                    <Input
-                      value={draft.displayName}
-                      onChange={(e) =>
-                        setDraft((prev) =>
-                          prev
-                            ? { ...prev, displayName: e.target.value }
-                            : prev,
-                        )
-                      }
-                      placeholder="e.g. Flower Room 1"
-                      className="max-w-sm"
-                    />
-                  </div>
+                  {selectedRoom.purpose ? (
+                    <p className="text-2xs text-muted-foreground">
+                      {selectedRoom.purpose}
+                    </p>
+                  ) : null}
                 </CardContent>
               </Card>
 
-              <RoomEquipmentForm
-                value={draft.equipmentMap}
-                onChange={(next) =>
-                  setDraft((prev) =>
-                    prev ? { ...prev, equipmentMap: next } : prev,
-                  )
-                }
-                entities={entities}
-                areas={areas}
-                entityById={entityById}
-                defaultAreaId={roomAreaId}
-                disabled={saveMutation.isPending}
-              />
+              <QueryState
+                isLoading={sensorsQuery.isLoading || equipmentQuery.isLoading}
+                isError={sensorsQuery.isError || equipmentQuery.isError}
+                error={sensorsQuery.error ?? equipmentQuery.error}
+              >
+                <RoomEquipmentForm
+                  roomId={selectedRoom.id}
+                  sensors={sensors}
+                  equipment={equipment}
+                  entities={entities}
+                  areas={areas}
+                  entityById={entityById}
+                  defaultAreaId={roomAreaId}
+                />
+              </QueryState>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <Button
-                  onClick={handleSave}
-                  disabled={saveMutation.isPending}
-                >
-                  {saveMutation.isPending ? "Saving…" : "Save room"}
-                </Button>
-                {saved === draft.roomId && !saveMutation.isPending ? (
-                  <span className="text-xs text-healthy">
-                    Saved successfully.
-                  </span>
-                ) : null}
-                {saveMutation.isError ? (
-                  <span className="text-xs text-critical">
-                    {errorText(saveMutation.error)}
-                  </span>
-                ) : null}
-              </div>
+              <p className="text-2xs text-muted-foreground">
+                Changes apply immediately — there is no save button. Each
+                picked entity is stored as a sensor or equipment record
+                tied to this room.
+              </p>
             </div>
           )}
         </div>
@@ -399,14 +357,17 @@ export default function AdminRoomsPage() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         title="New room"
-        description="Pick a short room id (e.g. f1) and an optional display name."
+        description="Pick a short room name (e.g. F1, F2, VEG)."
         footer={
           <>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button disabled={!newRoomIdValid} onClick={handleCreate}>
-              Create
+            <Button
+              disabled={!newRoomNameValid || createRoomMutation.isPending}
+              onClick={() => createRoomMutation.mutate()}
+            >
+              {createRoomMutation.isPending ? "Creating…" : "Create"}
             </Button>
           </>
         }
@@ -414,35 +375,29 @@ export default function AdminRoomsPage() {
         <div className="space-y-3">
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">
-              Room id
+              Room name
             </label>
             <Input
-              value={newRoomId}
-              onChange={(e) => setNewRoomId(e.target.value)}
-              placeholder="e.g. f1"
+              value={newRoomName}
+              onChange={(e) => setNewRoomName(e.target.value)}
+              placeholder="e.g. F1"
               autoFocus
             />
-            {newRoomId.trim() &&
-            rooms.some((r) => r.room_id === newRoomId.trim()) ? (
+            {newRoomName.trim() &&
+            rooms.some(
+              (r) =>
+                r.name.toLowerCase() === newRoomName.trim().toLowerCase(),
+            ) ? (
               <p className="mt-1 text-2xs text-critical">
-                A room with this id already exists.
+                A room with this name already exists.
               </p>
             ) : null}
           </div>
-          <div>
-            <label className="mb-1 block text-xs text-muted-foreground">
-              Display name (optional)
-            </label>
-            <Input
-              value={newDisplayName}
-              onChange={(e) => setNewDisplayName(e.target.value)}
-              placeholder="e.g. Flower Room 1"
-            />
-          </div>
-          <p className="text-2xs text-muted-foreground">
-            The room is not persisted until you assign its equipment and
-            press Save.
-          </p>
+          {createRoomMutation.isError ? (
+            <p className="text-2xs text-critical">
+              {errorText(createRoomMutation.error)}
+            </p>
+          ) : null}
         </div>
       </Dialog>
 
@@ -453,32 +408,29 @@ export default function AdminRoomsPage() {
         title="Delete room"
         description={
           deleteTarget
-            ? `Permanently delete room "${deleteTarget.room_id}" and its equipment map?`
+            ? `Permanently delete room "${deleteTarget.name}"? Sensors and equipment in this room will lose their roomId.`
             : undefined
         }
         footer={
           <>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteTarget(null)}
-            >
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
               Cancel
             </Button>
             <Button
               variant="destructive"
-              disabled={deleteMutation.isPending}
+              disabled={deleteRoomMutation.isPending}
               onClick={() =>
-                deleteTarget && deleteMutation.mutate(deleteTarget.room_id)
+                deleteTarget && deleteRoomMutation.mutate(deleteTarget.id)
               }
             >
-              {deleteMutation.isPending ? "Deleting…" : "Delete room"}
+              {deleteRoomMutation.isPending ? "Deleting…" : "Delete room"}
             </Button>
           </>
         }
       >
-        {deleteMutation.isError ? (
+        {deleteRoomMutation.isError ? (
           <p className="text-xs text-critical">
-            {errorText(deleteMutation.error)}
+            {errorText(deleteRoomMutation.error)}
           </p>
         ) : null}
       </Dialog>

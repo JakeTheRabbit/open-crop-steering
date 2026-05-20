@@ -19,6 +19,14 @@ audit row; reads stay quiet.
 JSON wire shape is camelCase + epoch-ms timestamps so it is
 byte-compatible with a Convex document. Snake_case input is also
 accepted because ``populate_by_name=True`` is set on every schema.
+
+This module also exposes :func:`resolve_home_assistant_integration_id`
+— a small lazy-create helper that returns the singleton
+``sensorIntegrations`` row of ``type="home_assistant"`` for the current
+tenant, creating it on first use. Every OCS install talks to exactly
+one Home Assistant, so the entity picker (frontend) does not need to
+know the integration id up-front: the backend resolves it whenever a
+sensor or equipment row is being created against the HA integration.
 """
 
 from __future__ import annotations
@@ -53,6 +61,74 @@ log = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Home Assistant integration resolver (lazy singleton)
+# ---------------------------------------------------------------------------
+
+
+#: Display name used when lazy-creating the singleton HA integration row.
+HOME_ASSISTANT_INTEGRATION_NAME = "Home Assistant"
+
+#: Default poll cadence (seconds) for the auto-created HA integration.
+_HOME_ASSISTANT_DEFAULT_SYNC_INTERVAL = 60
+
+
+async def resolve_home_assistant_integration_id(
+    session: AsyncSession,
+    org_id: str,
+) -> str:
+    """Return the id of the org's singleton ``home_assistant`` integration.
+
+    Every OCS install talks to exactly one Home Assistant; therefore
+    there is exactly one ``sensorIntegrations`` row of
+    ``type="home_assistant"`` per tenant. This helper returns that
+    row's id, creating it on first use so the install stays
+    zero-config — the entity picker never has to surface "create the
+    HA integration" before the first sensor can be saved.
+
+    The row is committed inline (a flush would not be enough — the
+    caller's transaction would not see the integration on the same
+    request if rolled back later). Callers that need transactional
+    atomicity should pass an existing id directly instead.
+
+    Args:
+        session: An open async DB session.
+        org_id: The tenant the row belongs to (server-stamped from
+            :attr:`app.config.Settings.ocs_org_id`).
+
+    Returns:
+        The integration row's id.
+    """
+    row = (
+        await session.execute(
+            select(SensorIntegration).where(
+                SensorIntegration.org_id == org_id,
+                SensorIntegration.type == "home_assistant",
+            )
+        )
+    ).scalars().first()
+    if row is not None:
+        return row.id
+
+    integration = SensorIntegration(
+        org_id=org_id,
+        name=HOME_ASSISTANT_INTEGRATION_NAME,
+        type="home_assistant",
+        status="connected",
+        sync_enabled=True,
+        sync_interval=_HOME_ASSISTANT_DEFAULT_SYNC_INTERVAL,
+    )
+    session.add(integration)
+    await session.flush()
+    await session.refresh(integration)
+    log.info(
+        "ha_integration_lazy_created",
+        org_id=org_id,
+        sensor_integration_id=integration.id,
+    )
+    return integration.id
+
+
+# ---------------------------------------------------------------------------
 # Sensors
 # ---------------------------------------------------------------------------
 
@@ -80,9 +156,21 @@ async def create_sensor(
     identity: Annotated[Identity, Depends(require_role(RoleName.admin))],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Sensor:
-    """Create a sensor."""
+    """Create a sensor.
+
+    If the payload omits ``integrationId`` *and* declares an
+    ``externalId`` (a Home Assistant entity id, by convention), the
+    backend lazy-resolves the singleton ``home_assistant`` integration
+    row and attaches the sensor to it. This keeps the entity-picker UX
+    zero-config — the frontend never has to know the integration id.
+    """
     settings = get_settings()
-    sensor = Sensor(org_id=settings.ocs_org_id, **_sensor_payload(body))
+    payload = _sensor_payload(body)
+    if payload.get("integration_id") is None and payload.get("external_id"):
+        payload["integration_id"] = await resolve_home_assistant_integration_id(
+            session, settings.ocs_org_id
+        )
+    sensor = Sensor(org_id=settings.ocs_org_id, **payload)
     session.add(sensor)
     await session.flush()
     await session.refresh(sensor)
@@ -114,6 +202,17 @@ async def list_sensors(
         str | None,
         Query(alias="status", description="Filter to one status."),
     ] = None,
+    external_id: Annotated[
+        str | None,
+        Query(
+            alias="externalId",
+            description=(
+                "Filter to a single source-system identifier (e.g. an HA "
+                "entity id). Used by the entity picker to check whether a "
+                "sensor for a given HA entity already exists in a room."
+            ),
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """List sensors in the current tenant, optionally filtered."""
     settings = get_settings()
@@ -124,6 +223,8 @@ async def list_sensors(
         stmt = stmt.where(Sensor.type == type_)
     if status_filter is not None:
         stmt = stmt.where(Sensor.status == status_filter)
+    if external_id is not None:
+        stmt = stmt.where(Sensor.external_id == external_id)
     rows = (await session.execute(stmt.order_by(Sensor.created_at))).scalars()
     items = [
         SensorRead.model_validate(s).model_dump(mode="json", by_alias=True)
@@ -136,6 +237,7 @@ async def list_sensors(
         room_id=room_id,
         type=type_,
         status=status_filter,
+        external_id=external_id,
     )
     return {"sensors": items}
 

@@ -20,6 +20,7 @@ from app.db import get_session
 from app.models.batch import Batch
 from app.models.genetics import Genetics
 from app.models.grow_recipe import GrowRecipe
+from app.models.grow_recipe_day_override import GrowRecipeDayOverride
 from app.models.plant import Plant
 from app.models.user import RoleName
 from fastapi import FastAPI
@@ -311,3 +312,237 @@ class TestGrowRecipes:
         items = resp.json()["growRecipes"]
         assert len(items) == 1
         assert items[0]["recipeType"] == ["indoor", "hydroponic"]
+
+
+class TestGrowRecipeEffectiveTargets:
+    """GET /grow-recipes/{id}/effective-targets — resolver-backed read."""
+
+    def _recipe_with_targets(self) -> GrowRecipe:
+        return GrowRecipe(
+            id="r-1",
+            org_id=_FAKE_ORG,
+            name="Standard 14-day",
+            recipe_type=["indoor"],
+            is_active=True,
+            phases=[
+                {
+                    "phaseName": "Veg",
+                    "durationDays": 7.0,
+                    "order": 1.0,
+                    "targets": {
+                        "temp_day": {
+                            "value": 25.0,
+                            "tolerance": 0.5,
+                            "unit": "C",
+                        }
+                    },
+                },
+                {
+                    "phaseName": "Flower",
+                    "durationDays": 7.0,
+                    "order": 2.0,
+                    "targets": {
+                        "temp_day": {
+                            "value": 27.0,
+                            "tolerance": 0.5,
+                            "unit": "C",
+                        }
+                    },
+                },
+            ],
+            created_at=_FIXED_NOW,
+            updated_at=_FIXED_NOW,
+        )
+
+    async def test_full_grid_returns_one_cell_per_day(self) -> None:
+        recipe = self._recipe_with_targets()
+        session = _FakeSession(prefilled=[recipe])
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/cultivation/grow-recipes/r-1/effective-targets"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["cycleDayCount"] == 14
+        cells = body["effectiveTargets"]
+        # 14 days x 1 declared param.
+        assert len(cells) == 14
+        assert all(c["source"] == "phase_default" for c in cells)
+        # Day 1 in Veg, day 14 in Flower.
+        day1 = next(c for c in cells if c["day"] == 1)
+        assert day1["value"] == 25.0
+        assert day1["phaseName"] == "Veg"
+        day14 = next(c for c in cells if c["day"] == 14)
+        assert day14["value"] == 27.0
+        assert day14["phaseName"] == "Flower"
+
+    async def test_day_query_filters_to_single_day(self) -> None:
+        recipe = self._recipe_with_targets()
+        ov = GrowRecipeDayOverride(
+            id="ov-1",
+            org_id=_FAKE_ORG,
+            recipe_id="r-1",
+            day=3,
+            param_name="temp_day",
+            value=24.0,
+            tolerance=0.3,
+            unit="C",
+        )
+        session = _FakeSession(prefilled=[recipe, ov])
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/cultivation/grow-recipes/r-1/effective-targets?day=3"
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["cycleDayCount"] == 14
+        cells = body["effectiveTargets"]
+        assert len(cells) == 1
+        assert cells[0]["day"] == 3
+        assert cells[0]["value"] == 24.0
+        assert cells[0]["source"] == "day_override"
+
+    async def test_day_out_of_cycle_404(self) -> None:
+        recipe = self._recipe_with_targets()
+        session = _FakeSession(prefilled=[recipe])
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/cultivation/grow-recipes/r-1/effective-targets?day=99"
+            )
+        assert resp.status_code == 404
+
+    async def test_unknown_recipe_404(self) -> None:
+        session = _FakeSession()
+        async with await _client(session) as client:
+            resp = await client.get(
+                "/api/cultivation/grow-recipes/no-such/effective-targets"
+            )
+        assert resp.status_code == 404
+
+
+class TestReplaceDayOverrides:
+    """PUT /grow-recipes/{id}/day-overrides — bulk DELETE-then-INSERT."""
+
+    def _recipe(self) -> GrowRecipe:
+        return GrowRecipe(
+            id="r-1",
+            org_id=_FAKE_ORG,
+            name="Standard 14-day",
+            recipe_type=["indoor"],
+            is_active=True,
+            phases=[
+                {
+                    "phaseName": "Veg",
+                    "durationDays": 14.0,
+                    "order": 1.0,
+                    "targets": {
+                        "temp_day": {
+                            "value": 25.0,
+                            "tolerance": 0.5,
+                            "unit": "C",
+                        }
+                    },
+                }
+            ],
+            created_at=_FIXED_NOW,
+            updated_at=_FIXED_NOW,
+        )
+
+    async def test_replace_inserts_new_overrides(self) -> None:
+        recipe = self._recipe()
+        session = _FakeSession(prefilled=[recipe])
+        body = {
+            "overrides": [
+                {"day": 3, "paramName": "temp_day", "value": 24.0},
+                {"day": 5, "paramName": "temp_day", "value": 26.0},
+            ]
+        }
+        async with await _client(session) as client:
+            resp = await client.put(
+                "/api/cultivation/grow-recipes/r-1/day-overrides", json=body
+            )
+        assert resp.status_code == 200
+        result = resp.json()
+        assert result["deleted"] == 0
+        assert result["inserted"] == 2
+        assert len(result["overrides"]) == 2
+        # Each override row carries the recipeId from the URL path.
+        assert all(o["recipeId"] == "r-1" for o in result["overrides"])
+
+    async def test_replace_deletes_existing(self) -> None:
+        recipe = self._recipe()
+        old = GrowRecipeDayOverride(
+            id="ov-old",
+            org_id=_FAKE_ORG,
+            recipe_id="r-1",
+            day=3,
+            param_name="temp_day",
+            value=23.0,
+        )
+        session = _FakeSession(prefilled=[recipe, old])
+        body = {
+            "overrides": [
+                {"day": 5, "paramName": "temp_day", "value": 26.0},
+            ]
+        }
+        async with await _client(session) as client:
+            resp = await client.put(
+                "/api/cultivation/grow-recipes/r-1/day-overrides", json=body
+            )
+        assert resp.status_code == 200
+        result = resp.json()
+        assert result["deleted"] == 1
+        assert result["inserted"] == 1
+
+    async def test_day_out_of_cycle_422(self) -> None:
+        recipe = self._recipe()
+        session = _FakeSession(prefilled=[recipe])
+        body = {
+            "overrides": [
+                {"day": 99, "paramName": "temp_day", "value": 24.0},
+            ]
+        }
+        async with await _client(session) as client:
+            resp = await client.put(
+                "/api/cultivation/grow-recipes/r-1/day-overrides", json=body
+            )
+        assert resp.status_code == 422
+
+    async def test_unknown_recipe_404(self) -> None:
+        session = _FakeSession()
+        body: dict[str, Any] = {"overrides": []}
+        async with await _client(session) as client:
+            resp = await client.put(
+                "/api/cultivation/grow-recipes/no-such/day-overrides",
+                json=body,
+            )
+        assert resp.status_code == 404
+
+    async def test_empty_overrides_list_clears_existing(self) -> None:
+        recipe = self._recipe()
+        old1 = GrowRecipeDayOverride(
+            id="ov-1",
+            org_id=_FAKE_ORG,
+            recipe_id="r-1",
+            day=3,
+            param_name="temp_day",
+            value=23.0,
+        )
+        old2 = GrowRecipeDayOverride(
+            id="ov-2",
+            org_id=_FAKE_ORG,
+            recipe_id="r-1",
+            day=5,
+            param_name="temp_day",
+            value=22.0,
+        )
+        session = _FakeSession(prefilled=[recipe, old1, old2])
+        body: dict[str, Any] = {"overrides": []}
+        async with await _client(session) as client:
+            resp = await client.put(
+                "/api/cultivation/grow-recipes/r-1/day-overrides", json=body
+            )
+        assert resp.status_code == 200
+        result = resp.json()
+        assert result["deleted"] == 2
+        assert result["inserted"] == 0
