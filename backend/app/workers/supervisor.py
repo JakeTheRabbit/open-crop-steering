@@ -105,7 +105,7 @@ from app.models.runtime_adjustment import (
     AdjustmentSource,
 )
 from app.models.user import User
-from app.prompts import system_prompt
+from app.prompts import full_system_prompt
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -481,12 +481,17 @@ class Supervisor:
             A :class:`RoomTickResult` describing the call.
         """
         user_message = self._build_user_message(snapshot, action_set, breaches)
+        # full_system_prompt() = system.md (OCS schema + role) ++
+        # grow_room_agent_playbook.md (Legacy Ag operational reference).
+        # The same string is sent to the LLM AND recorded in the audited
+        # prompt payload, so what was reviewed is exactly what was sent.
+        system_content = full_system_prompt()
         messages = [
-            ChatMessage(role="system", content=system_prompt()),
+            ChatMessage(role="system", content=system_content),
             ChatMessage(role="user", content=user_message),
         ]
         prompt_payload: dict[str, Any] = {
-            "system": system_prompt(),
+            "system": system_content,
             "user": user_message,
             "snapshot_id": snapshot.id,
             "allowed_action_set": action_set_to_payload(action_set),

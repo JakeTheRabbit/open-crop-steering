@@ -50,6 +50,15 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["backend"]
 
+# Ship the prompt markdown files inside the wheel. Without this,
+# setuptools includes Python sources only and the prompts loader
+# (app.prompts._PROMPTS_DIR) raises FileNotFoundError at runtime —
+# silently in observe-only mode where the supervisor never reaches
+# the LLM call, but loud as soon as the cultivation / playbook
+# knowledge endpoints are hit.
+[tool.setuptools.package-data]
+"app.prompts" = ["*.md"]
+
 # ---------- ruff ----------
 [tool.ruff]
 line-length = 100
