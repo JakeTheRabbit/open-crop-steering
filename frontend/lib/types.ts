@@ -1025,3 +1025,124 @@ export interface GrowRecipeUpdateBody {
   createdBy?: string | null;
   lastModifiedBy?: string | null;
 }
+
+// --- HA-Irrigation-Strategy integration (P1) --------------------------
+//
+// The HA-IS integration is registered as one OCS room. The discovery
+// endpoint inspects HA, finds the HA-IS install, infers the zone count
+// from `crop_steering.env`, and surfaces a candidate mapping the
+// operator reviews + edits before POSTing the register endpoint.
+//
+// Source of truth:
+//   - design spec at docs/concepts/ha-irrigation-strategy-integration.md
+//     (§7 "Data-model translation" — what gets mapped where)
+//   - backend/app/integrations/ha_irrigation/ — discover + register
+//     handlers (built in parallel by the backend agent against this
+//     exact wire shape; camelCase JSON, no snake_case anywhere).
+
+/**
+ * One discovered HA-IS zone (location) candidate.
+ *
+ * `candidateEntities` is the backend's *suggestion* for the multi-entity
+ * pickers; the operator can add or remove entries from the full HA
+ * registry list before submitting register.
+ */
+export interface HaIrrigationZoneCandidate {
+  zoneIndex: number;
+  suggestedLocationLabel: string;
+  candidateEntities: {
+    vwcSensors: string[];
+    ecSensors: string[];
+    valves: string[];
+  };
+}
+
+/**
+ * Room-level role candidates (one entity per single-role, lists for
+ * multi-role like `ecTargets`). Each list is the suggested default
+ * for the matching picker.
+ */
+export interface HaIrrigationRoomLevelCandidates {
+  pump: string[];
+  mainlineValve: string[];
+  steeringIntent: string[];
+  ecTargets: string[];
+  anomalyBinarySensor: string[];
+  phaseSelect: string[];
+  rootsenseReportSensor: string[];
+}
+
+/** `GET /api/integrations/ha-irrigation/discover` response. */
+export interface HaIrrigationDiscoveryResult {
+  ok: boolean;
+  suggestedRoom: { name: string; externalSystemId: string };
+  detectedZoneCount: number;
+  zones: HaIrrigationZoneCandidate[];
+  roomLevelCandidates: HaIrrigationRoomLevelCandidates;
+  /** Surface as a top-of-form yellow banner. */
+  warnings: string[];
+}
+
+/**
+ * One zone in the register body — the operator's confirmed mapping
+ * after they reviewed + edited the discovery candidates.
+ *
+ * Field names mirror the candidate shape but the values are the
+ * picked HA entity IDs (one valve per zone is typical; multi-valve
+ * zones are allowed).
+ */
+export interface HaIrrigationRegisterZone {
+  zoneIndex: number;
+  locationLabel: string;
+  vwcSensors: string[];
+  ecSensors: string[];
+  valves: string[];
+}
+
+/** Room-level role picks the operator confirmed. */
+export interface HaIrrigationRegisterRoomLevel {
+  pump?: string;
+  mainlineValve?: string;
+  steeringIntent?: string;
+  ecTargets: string[];
+  anomalyBinarySensor?: string;
+  phaseSelect?: string;
+  rootsenseReportSensor?: string;
+}
+
+/** `POST /api/integrations/ha-irrigation/register` body. */
+export interface HaIrrigationRegisterBody {
+  room: { name: string; buildingId?: string };
+  zones: HaIrrigationRegisterZone[];
+  roomLevel: HaIrrigationRegisterRoomLevel;
+}
+
+/**
+ * `POST /api/integrations/ha-irrigation/register` response.
+ *
+ * The success-card UI renders the counts + the `records` block so the
+ * operator can see what landed where, with a link to
+ * `/admin/rooms` for follow-up edits.
+ */
+export interface HaIrrigationRegisterResult {
+  ok: boolean;
+  roomId: string;
+  buildingId: string;
+  locationsCreated: number;
+  locationsUpdated: number;
+  sensorsCreated: number;
+  sensorsUpdated: number;
+  equipmentCreated: number;
+  equipmentUpdated: number;
+  records: {
+    roomId: string;
+    buildingId: string;
+    locations: Array<{ zoneIndex: number; locationId: string }>;
+    sensors: Array<{ externalId: string; sensorId: string; type: string }>;
+    equipment: Array<{
+      externalId: string;
+      equipmentId: string;
+      scope: "room" | "zone";
+    }>;
+  };
+}

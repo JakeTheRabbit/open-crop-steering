@@ -37,4 +37,6 @@ export const queryKeys = {
     ["cultivation", "grow-recipe", id, "day-overrides"] as const,
   effectiveTargets: (id: string, day?: number) =>
     ["cultivation", "grow-recipe", id, "effective-targets", day ?? "all"] as const,
+  // --- HA-Irrigation-Strategy integration ---
+  haIrrigationDiscovery: ["integrations", "ha-irrigation", "discover"] as const,
 };

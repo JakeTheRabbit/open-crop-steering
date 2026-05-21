@@ -47,6 +47,9 @@ import type {
   GrowRecipeUpdateBody,
   GrowRecipesResponse,
   GuardrailsResponse,
+  HaIrrigationDiscoveryResult,
+  HaIrrigationRegisterBody,
+  HaIrrigationRegisterResult,
   HaRegistryResponse,
   Location,
   LocationUpsertBody,
@@ -503,6 +506,27 @@ export const api = {
     request<unknown>(
       `/api/cultivation/grow-recipes/${encodeURIComponent(recipeId)}/day-overrides`,
       { method: "PUT", body },
+    ),
+
+  // --- HA-Irrigation-Strategy integration (P1) --------------------
+  //
+  // Two endpoints handed off to the backend agent — one read (the
+  // discovery walk) and one write (the operator-confirmed mapping).
+  // The wire shape is the camelCase contract documented in
+  // `lib/types.ts` next to `HaIrrigationDiscoveryResult` /
+  // `HaIrrigationRegisterBody` / `HaIrrigationRegisterResult`.
+
+  /** Walk HA, infer zone count + role candidates from `crop_steering.env`. */
+  discoverHaIrrigation: (signal?: AbortSignal) =>
+    request<HaIrrigationDiscoveryResult>(
+      "/api/integrations/ha-irrigation/discover",
+      { signal },
+    ),
+  /** Materialize the operator's confirmed mapping into OCS rows. */
+  registerHaIrrigation: (body: HaIrrigationRegisterBody) =>
+    request<HaIrrigationRegisterResult>(
+      "/api/integrations/ha-irrigation/register",
+      { method: "POST", body },
     ),
 };
 

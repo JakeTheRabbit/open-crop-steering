@@ -34,6 +34,7 @@ from app.api import (
     sensors,
     sites,
 )
+from app.api.integrations import ha_irrigation as ha_irrigation_integration
 from app.config import get_settings
 from app.db import dispose_engine, get_engine
 from app.logging_config import configure_logging
@@ -121,6 +122,9 @@ app.include_router(sensors.readings_router)
 app.include_router(sensors.integrations_router)
 app.include_router(equipment.router)
 app.include_router(cultivation.router)
+# External-system integrations (P1-backend) — pure registry walk +
+# idempotent OCS-side bootstrap. No HA writes from this pass.
+app.include_router(ha_irrigation_integration.router)
 
 
 def _mount_static_ui(application: FastAPI) -> None:

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   CheckSquare,
   Cannabis,
+  Cable,
   LayoutDashboard,
   ListChecks,
   Plug,
@@ -37,6 +38,11 @@ const NAV: NavItem[] = [
 const ADMIN_NAV: NavItem[] = [
   { href: "/admin/users", label: "Users & Roles", icon: Users },
   { href: "/admin/rooms", label: "Rooms & Equipment", icon: Plug },
+  {
+    href: "/admin/integrations/ha-irrigation",
+    label: "HA-Irrigation",
+    icon: Cable,
+  },
   { href: "/admin/guardrails", label: "Guardrails", icon: ListChecks },
   { href: "/admin/no-touch-windows", label: "No-Touch Windows", icon: Clock },
 ];
