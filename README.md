@@ -164,3 +164,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). PRs welcome; please open an issue first 
 ## Security
 
 See [SECURITY.md](SECURITY.md) for vulnerability disclosure.
+
+> **This repo is free. My 2am dryback debugging is not.** If it saved you a crop, a weekend, or a nervous breakdown — [buy the rabbit a bag of nutes](https://github.com/sponsors/JakeTheRabbit). If it didn't, keep your money. I respect a tight nutrient budget.
