@@ -1,5 +1,7 @@
 # Open Crop Steering
 
+> **This repo is free. My 2am dryback debugging is not.** If it saved you a crop, a weekend, or a nervous breakdown — [buy the rabbit a bag of nutes](https://github.com/sponsors/JakeTheRabbit). If it didn't, keep your money. I respect a tight nutrient budget.
+
 > **⚠️ Reference / Unvalidated** — not for use as the sole controller in regulated cultivation without local validation evidence. See [`docs/compliance/`](docs/compliance/) for what "validated" looks like.
 
 A Home Assistant add-on (with standalone Docker fallback) that turns cultivation recipes into immutable, versioned plans; layers AI-driven runtime overlays bounded by hard guardrails; and produces tamper-evident audit records suitable for regulated medicinal cannabis facilities.
@@ -164,5 +166,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). PRs welcome; please open an issue first 
 ## Security
 
 See [SECURITY.md](SECURITY.md) for vulnerability disclosure.
-
-> **This repo is free. My 2am dryback debugging is not.** If it saved you a crop, a weekend, or a nervous breakdown — [buy the rabbit a bag of nutes](https://github.com/sponsors/JakeTheRabbit). If it didn't, keep your money. I respect a tight nutrient budget.
